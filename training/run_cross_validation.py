@@ -646,10 +646,10 @@ def run_cv_main():
     epochs = cv_config.get('epochs', 20)
     if args.quick:
         epochs = 5
-        cv_config['alpha_grid'] = [0.001, 0.1]
-        cv_config['beta_grid'] = [0.001, 0.1]
+        cv_config['alpha_grid'] = [0.001]
+        cv_config['beta_grid'] = [0.001]
         cv_config['orphan_fraction_grid'] = [0.1]
-        cv_config['gnn_layers_grid'] = [1, 2, 3]
+        cv_config['gnn_layers_grid'] = [3,4,5]
         cv_config['lr_grid'] = [0.001]
         cv_config['dropout_grid'] = [0.1]
         cv_config['weight_decay_grid'] = [1e-5]

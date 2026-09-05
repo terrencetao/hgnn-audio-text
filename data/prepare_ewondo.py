@@ -381,9 +381,9 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Prétraitement du dataset EWONDO")
-    parser.add_argument("--raw_dir", type=str, default="./data/raw/ewondo",
+    parser.add_argument("--raw_dir", type=str, default="./raw/ewondo",
                        help="Dossier contenant les données brutes")
-    parser.add_argument("--output_dir", type=str, default="./data/processed/ewondo",
+    parser.add_argument("--output_dir", type=str, default="./processed/ewondo",
                        help="Dossier de sortie")
     parser.add_argument("--relative_paths", action="store_true",
                        help="Utiliser des chemins relatifs (par défaut: absolus)")
