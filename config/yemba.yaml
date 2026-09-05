@@ -1,0 +1,52 @@
+experiment_name: yemba_hgnn_soft_dropout
+
+data:
+  audio_dir: /path/to/yemba/audio
+  metadata_csv: /path/to/yemba/metadata.csv  # colonnes: audio_path, transcription, speaker_id
+  n_words: 60
+  n_speakers: 69
+  induction_words_json: /path/to/yembatones_induction.json  # 100 mots pour l'induction
+
+encoder:
+  backbone: facebook/wav2vec2-xls-r-300m  # ou w2v-BERT si dispo
+  freeze_backbone: true      # le backbone reste gelé, seul l'attentive pooling + GNN sont entraînés
+  pooling: attentive         # 'mean' (ancien) ou 'attentive' (nouveau, niveau phrase)
+  hidden_dim: 1024
+
+linguistic:
+  representation: bag_of_phonemes   # 'labse' | 'bag_of_phonemes' | 'articulatory'
+  similarity_threshold_delta_l: 0.6 # seuil delta_l pour les arêtes G_l <-> G_l
+
+graph:
+  k_neighbors_audio: 5       # k pour les arêtes audio-audio (k-NN sur features brutes)
+  gnn_layers: 2
+
+dropout:
+  regime: soft                # UNIQUEMENT 'soft' -- décision prise, pas de 'pur'
+  orphan_fraction: 0.3         # hyperparamètre à optimiser par validation croisée -- valeur de départ
+  resample_every_iteration: true  # re-tirage à CHAQUE itération, jamais figé pour une epoch
+
+loss_weights:
+  alpha: 1.0    # poids de L_acoustic -- À OPTIMISER (CV)
+  beta: 1.0     # poids de L_reg -- À OPTIMISER (CV)
+  # L_contrast n'a pas de poids séparé dans la formulation actuelle (cf. slides), à revoir si besoin
+
+cross_validation:
+  n_folds: 5
+  reference_fraction_grid: [0.0, 0.2, 0.5, 0.8, 1.0]  # fraction du graphe train gardée comme référence
+  alpha_grid: [0.5, 1.0, 2.0]
+  beta_grid: [0.5, 1.0, 2.0]
+  orphan_fraction_grid: [0.1, 0.3, 0.5]
+  # Protocole (cf. training/cross_validation.py) :
+  #   Étage 1 : Alignment + Uniformity conjoints -> shortlist
+  #   Étage 2 : AUC du link predictor sur la shortlist -> config retenue
+
+training:
+  batch_size: 32
+  lr_gnn: 1e-3
+  lr_pooling: 1e-3
+  epochs: 100
+  optimizer: adamw
+  device: cuda
+
+output_dir: ./runs/yemba_hgnn

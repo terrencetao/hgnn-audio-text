@@ -1,0 +1,55 @@
+# config/cv.yaml
+# Configuration pour la validation croisée
+
+# ============================================================================
+# GRILLES D'HYPERPARAMÈTRES À TESTER
+# ============================================================================
+
+# Poids des pertes
+alpha_grid: [0.001,0.1, 0.3, 0.5, 0.7, 0.9]
+beta_grid: [0.001, 0.3, 0.5, 0.7, 0.9]
+# Température pour les pertes contrastives
+tau_grid: [0.1, 0.2, 0.5]
+
+# Dropout de modalité
+orphan_fraction_grid: [0.3]
+
+# Architecture du GNN
+gnn_layers_grid: [1, 2, 3]
+
+# Optimisation
+lr_grid: [0.0001]
+dropout_grid: [0.05, 0.1]
+weight_decay_grid: [1e-6]
+
+# ============================================================================
+# PARAMÈTRES DE LA VALIDATION CROISÉE
+# ============================================================================
+
+# Nombre de folds
+n_folds: 5
+
+# Nombre de candidats pour l'étape 2
+top_k: 5
+
+# Splits par locuteur (true = préserve les locuteurs dans un même fold)
+by_speaker: false
+
+# Seed pour la reproductibilité
+seed: 42
+
+# Nombre d'époques par entraînement (CV rapide)
+epochs: 5        0
+
+# ============================================================================
+# OPTIONS AVANCÉES
+# ============================================================================
+
+# Mode verbose (affiche plus de détails)
+verbose: true
+
+# Sauvegarder les modèles intermédiaires
+save_intermediate: false
+
+# Utiliser le cache des features
+use_cache: true

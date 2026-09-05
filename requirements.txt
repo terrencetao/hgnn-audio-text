@@ -1,0 +1,58 @@
+# Core ML/DL
+torch>=2.1.0
+torchaudio>=2.1.0
+torchvision>=0.16.0
+
+# PyTorch Geometric
+#torch-geometric>=2.5.0
+#torch-scatter>=2.1.0
+#torch-sparse>=0.6.17
+#torch-cluster>=1.6.1
+#torch-spline-conv
+
+# Hugging Face
+transformers>=4.40.0
+sentence-transformers>=2.2.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+soxr>=0.3.0
+
+# Graph processing
+networkx
+netbone
+scipy>=1.12.0
+
+# NLP/Phonetics
+panphon>=0.20.0
+g2p-en>=2.1.0
+
+# Data science
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+scipy>=1.12.0
+
+# Visualization
+matplotlib
+seaborn>=0.13.0
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.66.0
+click>=8.1.0
+colorama>=0.4.6
+
+# Experiment tracking (optional)
+wandb>=0.16.0
+tensorboard>=2.16.0
+
+# Development
+black>=24.0.0
+pylint>=3.0.0
+pytest>=8.0.0
+pre-commit>=3.6.0
+
+# Audio processing system dependencies (on Linux)
+# sudo apt-get install ffmpeg libsndfile1
