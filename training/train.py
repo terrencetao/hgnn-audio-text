@@ -65,11 +65,8 @@ def to_bool(value):
     return value
 
 
-# FIX (cf. discussion) : seuil explicite pour identifier une transcription
-# EXACTE (poids 1.0, cf. build_cross_edges) parmi les arêtes croisées --
-# remplace le "0.9" en dur utilisé pour L_acoustic et L_contrast, plus
-# proche du vrai poids attendu et plus lisible.
-EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD = 0.999
+# Seuil pour identifier une transcription exacte (poids 1.0)
+EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD = 1.0
 
 
 # ============================================================================
@@ -140,7 +137,7 @@ class Trainer:
             for key in ['epochs', 'batch_size']:
                 if key in training:
                     training[key] = to_int(training[key])
-            for key in ['lr_gnn', 'weight_decay', 'dropout', 'grad_clip', 'test_edge_fraction']:
+            for key in ['lr_gnn', 'weight_decay', 'dropout', 'grad_clip', 'test_edge_fraction', 'tau']:
                 if key in training:
                     training[key] = to_float(training[key])
             if 'device' in training:
@@ -284,10 +281,47 @@ class Trainer:
         Récupère les paires (audio, word) à masquer pour éviter la fuite de supervision.
         Retourne un tenseur de shape (2, E) contenant les indices audio et word.
         """
-        # Utiliser les arêtes d'entraînement comme cibles
         if self.train_mask is not None and self.train_mask.sum() > 0:
             return self.cross_edge_index[:, self.train_mask]
         return torch.tensor([[], []], dtype=torch.long, device=self.device)
+    
+    def _sample_negatives_supervised(
+        self,
+        anchor_indices: torch.Tensor,      # (K,) - indices des ancres
+        positive_indices: torch.Tensor,    # (K,) - indices des positifs
+        all_embeddings: torch.Tensor,      # (N, D) - tous les embeddings disponibles pour les négatifs
+        n_negatives_per_pair: int = 1,     # Nombre de négatifs par paire (1 = autant de négatifs que de positifs)
+    ) -> torch.Tensor:
+        """
+        Échantillonne des négatifs pour chaque paire (ancre, positif) en mode supervisé.
+        Garantit que les négatifs sont différents de l'ancre ET du positif.
+        
+        Args:
+            anchor_indices: (K,) - indices des ancres
+            positive_indices: (K,) - indices des positifs
+            all_embeddings: (N, D) - tous les embeddings disponibles pour les négatifs
+            n_negatives_per_pair: nombre de négatifs par paire (1 = autant que de positifs)
+        
+        Returns:
+            (K, n_negatives_per_pair, D) - embeddings des négatifs
+        """
+        K = anchor_indices.shape[0]
+        N = all_embeddings.shape[0]
+        
+        # Générer des indices négatifs
+        neg_indices = torch.randint(0, N, (K, n_negatives_per_pair), device=self.device)
+        
+        # S'assurer que les négatifs sont différents de l'ancre ET du positif
+        for i in range(K):
+            anchor_idx = anchor_indices[i].item()
+            positive_idx = positive_indices[i].item()
+            
+            for j in range(n_negatives_per_pair):
+                while neg_indices[i, j] == anchor_idx or neg_indices[i, j] == positive_idx:
+                    neg_indices[i, j] = torch.randint(0, N, (1,), device=self.device).item()
+        
+        # Récupérer les embeddings
+        return all_embeddings[neg_indices]  # (K, n_negatives_per_pair, D)
     
     def train_epoch(self) -> tuple[float, float, float]:
         """Entraîne une époque en full-batch."""
@@ -298,6 +332,7 @@ class Trainer:
         alpha = to_float(self.config['loss_weights']['alpha'])
         beta = to_float(self.config['loss_weights']['beta'])
         grad_clip = to_float(self.config['training']['grad_clip'])
+        tau = to_float(self.config['training'].get('tau', 0.1))
         
         self.optimizer.zero_grad()
         
@@ -322,19 +357,7 @@ class Trainer:
         if n_orphans > 0:
             print(f"   🔇 Nœuds orphelins: {n_orphans}/{n_total} ({100*n_orphans/n_total:.1f}%)")
         
-        # 2. Anti-fuite de supervision -- RÉELLEMENT activée cette fois
-        # (le commentaire précédent disait "(ACTIVÉ)" mais le code restait
-        # commenté -- cf. discussion). Empêche un nœud non-orphelin de
-        # "voir" sa propre arête cible via la relation inverse
-        # ("word","rev_transcribed_as","audio") pendant l'agrégation qui
-        # produit son propre embedding.
-        #target_pairs = self._get_target_pairs()
-        #if target_pairs is not None and target_pairs.shape[1] > 0:
-        #    masked_edge_index, masked_edge_weight = apply_supervision_leak_mask(
-        #        masked_edge_index, masked_edge_weight, target_pairs
-        #    )
-        
-        # 3. Préparer les entrées du GNN
+        # 2. Préparer les entrées du GNN
         features_dict = {
             'audio': self.frame_features,
             'word': self.linguistic_features
@@ -351,7 +374,7 @@ class Trainer:
             ('word', 'rev_transcribed_as', 'audio'): masked_edge_index.flip(0)
         }
         
-        # 4. Forward pass du GNN
+        # 3. Forward pass du GNN
         x_dict, pooled_dict = self.gnn(
             features_dict=features_dict,
             attention_mask_dict=attention_mask_dict,
@@ -359,7 +382,7 @@ class Trainer:
             return_pooled=True
         )
         
-        # 5. Adapter le Link Predictor si nécessaire
+        # 4. Adapter le Link Predictor si nécessaire
         if self.link_predictor.net[0].in_features != x_dict['audio'].shape[-1] * 2:
             hidden_dim = x_dict['audio'].shape[-1]
             self.link_predictor = LinkPredictor(hidden_dim).to(self.device)
@@ -373,24 +396,11 @@ class Trainer:
             )
             print(f"   🔄 Link Predictor adapté à la dimension: {hidden_dim}")
         
-        # 6. Calculer L_reg sur TOUTES les arêtes d'entraînement -- orphelines
-        # INCLUSES (FIX critique, cf. discussion).
-        #
-        # AVANT : ce bloc utilisait `masked_edge_index` (post-dropout), qui
-        # exclut PAR CONSTRUCTION toutes les arêtes des nœuds orphelins.
-        # Résultat : un nœud orphelin ne recevait plus AUCUN gradient de
-        # L_reg -- ce qui défait l'objectif même du régime soft (apprendre
-        # à un nœud orphelin, via le Canal 2, à rester prédictible comme
-        # lié à son vrai mot).
-        #
-        # `masked_edge_index` reste utilisé pour le FORWARD PASS du GNN
-        # (ligne du edge_index_dict ci-dessus) -- c'est correct, c'est ce
-        # qui produit l'embedding "Canal 2 uniquement" pour les orphelins.
-        # C'est seulement la SÉLECTION DES PAIRES CIBLES de la loss qui
-        # doit repartir de l'ensemble complet des arêtes d'entraînement.
+        # 5. Préparer les arêtes d'entraînement
         train_edges = self.cross_edge_index[:, self.train_mask]
         train_weights = self.cross_edge_weight[self.train_mask]
-
+        
+        # 6. Calculer L_reg sur TOUTES les arêtes d'entraînement (orphelines incluses)
         if train_edges.shape[1] > 0:
             h_audio_edges = x_dict['audio'][train_edges[0]]
             h_word_edges = x_dict['word'][train_edges[1]]
@@ -400,14 +410,6 @@ class Trainer:
             l_reg = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         # 7. L_test pour le monitoring (sur les arêtes de test)
-        # FIX : suppression du filtrage additionnel par orphan_mask -- les
-        # arêtes de test sont déjà exclues du graphe vu par le GNN (elles
-        # ne font jamais partie de masked_edge_index, cf. train_mask dans
-        # apply_soft_dropout), donc aucune fuite possible ici. Les filtrer
-        # EN PLUS par orphan_mask faisait varier l'ensemble d'évaluation
-        # d'une epoch à l'autre (selon quels nœuds étaient orphelins ce
-        # coup-ci), rendant l_test moins stable/comparable entre epochs
-        # sans bénéfice de correction en échange.
         with torch.no_grad():
             if self.test_mask.sum() > 0:
                 test_edges = self.cross_edge_index[:, self.test_mask]
@@ -423,12 +425,8 @@ class Trainer:
             else:
                 l_test = torch.tensor(0.0, device=self.device)
         
-        # 8. Calculer L_acoustic (similarité audio-audio)
-        # Les paires positives = arêtes audio-audio avec poids = 1 (similarité parfaite)
-        # FIX : .get() + to_float() pour rester cohérent avec le reste des
-        # valeurs numériques de la config -- évite un KeyError si absent,
-        # et gère le cas où la valeur serait chargée comme string.
-        tau = to_float(self.config['training'].get('tau', 0.1))
+        # 8. Calculer L_acoustic (similarité audio-audio) - VERSION SUPERVISÉE
+        # Chaque ancre audio a autant de négatifs que de positifs (1 négatif par paire)
         if x_dict is not None and 'audio' in x_dict:
             audio_pooled = x_dict['audio']  # (N, D)
             
@@ -436,48 +434,24 @@ class Trainer:
             audio_audio_edge_index = self.graph['audio', 'similar_to', 'audio'].edge_index
             audio_audio_weight = self.graph['audio', 'similar_to', 'audio'].edge_weight
             
-            # Filtrer pour garder seulement les paires positives (transcription/similarité quasi-exacte)
+            # Filtrer pour garder seulement les paires positives (transcription exacte)
             positive_mask = (audio_audio_weight >= EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD)
             positive_edges = audio_audio_edge_index[:, positive_mask]
             
             if positive_edges.shape[1] > 0:
+                # L'ancre est audio[0], le positif est audio[1]
+                # Générer 1 négatif par paire (autant de négatifs que de positifs)
+                h_negatives = self._sample_negatives_supervised(
+                    anchor_indices=positive_edges[0],      # Audio anchor
+                    positive_indices=positive_edges[1],    # Audio positive
+                    all_embeddings=audio_pooled,
+                    n_negatives_per_pair=1
+                )  # (K, 1, D)
+                
                 h_anchor = audio_pooled[positive_edges[0]]  # (K, D)
                 h_positive = audio_pooled[positive_edges[1]]  # (K, D)
                 
-                # Générer des négatifs aléatoires (version simplifiée)
-                n_negatives = min(10, audio_pooled.shape[0] - 1)
-                K = positive_edges.shape[1]
-                
-                # Créer un tenseur d'indices négatifs
-                neg_indices = torch.randint(
-                    0, audio_pooled.shape[0], 
-                    (K, n_negatives),
-                    device=self.device
-                )
-                
-                # Version simplifiée : remplacer les mauvais indices en une seule fois
-                for i in range(K):
-                    anchor_idx = positive_edges[0][i]
-                    positive_idx = positive_edges[1][i]
-                    
-                    # Remplacer les indices qui sont l'ancre ou le positif
-                    mask_bad = (neg_indices[i] == anchor_idx) | (neg_indices[i] == positive_idx)
-                    if mask_bad.any():
-                        n_bad = mask_bad.sum().item()
-                        # Générer de nouveaux indices, en s'assurant qu'ils sont différents
-                        new_indices = torch.randint(
-                            0, audio_pooled.shape[0], 
-                            (n_bad,),
-                            device=self.device
-                        )
-                        # Si les nouveaux indices sont encore mauvais, on les décale
-                        while (new_indices == anchor_idx).any() or (new_indices == positive_idx).any():
-                            new_indices = (new_indices + 1) % audio_pooled.shape[0]
-                        neg_indices[i][mask_bad] = new_indices
-                
-                h_negatives = audio_pooled[neg_indices]  # (K, M, D)
-                
-                # Calculer L_acoustic avec tau depuis la config
+                # Calculer L_acoustic avec la version supervisée
                 l_acoustic = acoustic_loss(
                     h_anchor,
                     h_positive,
@@ -489,46 +463,43 @@ class Trainer:
         else:
             l_acoustic = torch.tensor(0.0, device=self.device, requires_grad=True)
         
-        # 9. Calculer L_contrast (alignement audio-texte)
-        # Les paires positives = arêtes cross avec poids ~1 (transcription exacte)
+        # 9. Calculer L_contrast (alignement audio-texte) - VERSION SUPERVISÉE
+        # Chaque mot a autant de négatifs audio que de positifs (1 négatif par paire)
         if (x_dict is not None and 
             'word' in x_dict and 
             'audio' in x_dict):
             
-            h_word_pooled = x_dict['word']  # (num_words, D)
-            h_audio_pooled = x_dict['audio']  # (num_audio, D)
+            h_word_pooled = x_dict['word']  # (W, D)
+            h_audio_pooled = x_dict['audio']  # (N, D)
 
-            # FIX CRITIQUE (cf. discussion) : utiliser train_edges/train_weights
-            # (TOUTES les arêtes d'entraînement, orphelines incluses -- déjà
-            # calculées au point 6 ci-dessus), PAS masked_edge_index.
-            #
-            # AVANT : ce bloc filtrait sur masked_edge_index, qui exclut PAR
-            # CONSTRUCTION les arêtes des nœuds orphelins. Un nœud orphelin
-            # ne recevait donc JAMAIS de gradient de L_contrast -- alors
-            # que c'est précisément cette perte qui doit lui apprendre à
-            # rester sémantiquement aligné en s'appuyant uniquement sur le
-            # Canal 2 (ses voisins). Le défaut était total : le mécanisme
-            # entier de dropout perdait son intérêt pour cette loss.
-            #
-            # h_audio_pooled / h_word_pooled restent calculés à partir du
-            # forward sur masked_edge_index (correct : c'est la représentation
-            # "vue depuis le Canal 2" qu'on veut justement évaluer) -- seule
-            # la SÉLECTION des paires cibles change.
+            # Utiliser toutes les arêtes d'entraînement
             if train_edges.shape[1] > 0:
+                # Filtrer les paires avec transcription exacte
                 positive_mask = (train_weights >= EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD)
-                positive_edges = train_edges[:, positive_mask]
+                positive_edges = train_edges[:, positive_mask]  # [audio, word]
                 
                 if positive_edges.shape[1] > 0:
-                    # Pour chaque arête positive, c'est une paire (word, audio)
-                    # Attention: train_edges est [audio, word]
-                    h_audio_pos = h_audio_pooled[positive_edges[0]]  # (E, D)
-                    h_word_pos = h_word_pooled[positive_edges[1]]    # (E, D)
+                    # Pour L_contrast :
+                    # - L'ancre est le mot (word)
+                    # - Le positif est l'audio correspondant
+                    # - Les négatifs sont des audios différents
                     
-                    # Utiliser tous les embeddings audio comme dénominateur
+                    # Générer 1 négatif audio par paire (autant que de positifs)
+                    h_audio_neg = self._sample_negatives_supervised(
+                        anchor_indices=positive_edges[1],    # Word anchor
+                        positive_indices=positive_edges[0],  # Audio positive
+                        all_embeddings=h_audio_pooled,
+                        n_negatives_per_pair=1
+                    )  # (K, 1, D)
+                    
+                    h_word = h_word_pooled[positive_edges[1]]  # (K, D)
+                    h_audio_pos = h_audio_pooled[positive_edges[0]]  # (K, D)
+                    
+                    # Calculer L_contrast avec la version supervisée
                     l_contrast = contrastive_alignment_loss(
-                        h_word_pos,        # (E, D) - embeddings textes des paires positives
-                        h_audio_pos,       # (E, D) - embeddings audio des paires positives
-                        h_audio_pooled,    # (num_audio, D) - tous les embeddings audio
+                        h_word,
+                        h_audio_pos,
+                        h_audio_neg,
                         tau=tau
                     )
                 else:
@@ -539,7 +510,7 @@ class Trainer:
             l_contrast = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         # 10. Loss totale
-        print(f'lacoustic: {l_acoustic}, lcontrast: {l_contrast}, lreg: {l_reg}')
+        print(f'L_acoustic: {l_acoustic.item():.4f}, L_contrast: {l_contrast.item():.4f}, L_reg: {l_reg.item():.4f}')
         loss = total_loss(l_acoustic, l_reg, l_contrast, alpha, beta)
         
         # Vérifier que loss a bien un grad_fn

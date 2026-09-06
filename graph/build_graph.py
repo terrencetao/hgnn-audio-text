@@ -15,6 +15,8 @@ from torch_geometric.data import HeteroData
 import networkx as nx
 import netbone as nb
 from netbone.filters import boolean_filter, threshold_filter, fraction_filter
+import torch.nn.functional as F
+import librosa
 
 
 @dataclass
@@ -37,14 +39,114 @@ def compute_cosine_similarity_matrix(features: torch.Tensor) -> torch.Tensor:
     """
     features_norm = features / features.norm(dim=1, keepdim=True)
     return features_norm @ features_norm.T
+    
 
+
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+import librosa
+
+
+def compute_cosine_similarity_matrix(
+    features: torch.Tensor
+) -> torch.Tensor:
+    """
+    Similarité cosine classique pour des vecteurs (N, D).
+    Utilisée pour les représentations linguistiques.
+    """
+
+    if features.dim() != 2:
+        raise ValueError(
+            f"Expected (N, D), got {features.shape}"
+        )
+
+    features = F.normalize(
+        features,
+        p=2,
+        dim=-1
+    )
+
+    return features @ features.T
+
+
+def dtw_cosine_distance(
+    x: torch.Tensor,
+    y: torch.Tensor
+) -> float:
+
+    x = F.normalize(x, p=2, dim=-1)
+    y = F.normalize(y, p=2, dim=-1)
+
+    # Matrice frame-frame
+    cosine_similarity = x @ y.T
+
+    # cosine distance
+    cost = 1.0 - cosine_similarity
+
+    cost = cost.detach().cpu().numpy()
+
+    # DTW
+    accumulated_cost, path = librosa.sequence.dtw(
+        C=cost,
+        backtrack=True
+    )
+
+    # Normalisation par la longueur du chemin
+    return float(
+        accumulated_cost[-1, -1] / len(path)
+    )
+
+
+def compute_audio_dtw_similarity_matrix(
+    frame_features: torch.Tensor
+) -> torch.Tensor:
+
+    """
+    frame_features : (N, T, D)
+
+    Retourne une matrice de similarité (N, N).
+    """
+
+    if frame_features.dim() != 3:
+        raise ValueError(
+            f"Expected (N, T, D), got {frame_features.shape}"
+        )
+
+    N = frame_features.shape[0]
+
+    distance_matrix = torch.zeros(
+        (N, N),
+        dtype=torch.float32
+    )
+
+    for i in range(N):
+
+        for j in range(i, N):
+
+            distance = dtw_cosine_distance(
+                frame_features[i],
+                frame_features[j]
+            )
+
+            distance_matrix[i, j] = distance
+            distance_matrix[j, i] = distance
+
+    # Distance -> similarity
+    similarity_matrix = torch.exp(
+        -distance_matrix
+    )
+
+    return similarity_matrix
 
 def apply_netbone_backbone(
     edge_index: torch.Tensor,
     edge_weight: torch.Tensor,
     num_nodes: int,
     method: str = "mst",
-    ensure_connectivity: bool = True
+    ensure_connectivity: bool = True,
+    sim_matrix: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Applique le backbone filtering avec netbone sur le graphe.
@@ -57,6 +159,11 @@ def apply_netbone_backbone(
         num_nodes: nombre total de nœuds
         method: méthode de backbone à utiliser
         ensure_connectivity: assurer que le graphe résultat est connexe
+        sim_matrix: (N, N) -- FIX (cf. discussion) : matrice de similarité
+            complète, utilisée pour choisir une VRAIE meilleure paire lors
+            du pontage de composantes déconnectées (voir point 2 ci-dessous).
+            Optionnelle pour compatibilité ascendante ; sans elle, on
+            retombe sur l'ancien comportement (poids arbitraire 0.1).
     
     Returns:
         filtered_edge_index: (2, E')
@@ -90,10 +197,20 @@ def apply_netbone_backbone(
             
             for u in comp1:
                 for v in comp2:
-                    if G.has_edge(u, v):
-                        w = G[u][v]['weight']
+                    # FIX (cf. discussion, point 2) : u et v appartiennent
+                    # par définition à des composantes DIFFÉRENTES, donc
+                    # G.has_edge(u, v) est TOUJOURS faux ici -- l'ancienne
+                    # branche qui le vérifiait était du code mort, et `w`
+                    # valait systématiquement 0.1 (poids arbitraire), donc
+                    # `best_edge` se figeait sur la PREMIÈRE paire
+                    # rencontrée, pas la meilleure. On utilise maintenant
+                    # la vraie similarité acoustique quand elle est
+                    # disponible, pour choisir un pont pertinent plutôt
+                    # qu'arbitraire entre les deux composantes.
+                    if sim_matrix is not None:
+                        w = sim_matrix[u, v].item()
                     else:
-                        w = 0.1
+                        w = 0.1  # repli si sim_matrix non fournie (compat. ascendante)
                     
                     if w > best_weight:
                         best_weight = w
@@ -168,6 +285,16 @@ def apply_netbone_backbone(
     print(f"   Arêtes avant filtrage: {edge_index.shape[1]}")
     print(f"   Arêtes après filtrage: {filtered_edge_index.shape[1]}")
     
+    # FIX CRITIQUE (cf. discussion, point 1) : networkx dédoublonne les
+    # arêtes non-dirigées -- G.edges() ne retourne chaque paire (u,v)
+    # qu'UNE SEULE FOIS, alors que edge_index en entrée contenait les DEUX
+    # sens (matrice de similarité symétrique). Sans cette symétrisation,
+    # le message passing PyG sur ("audio","similar_to","audio") devient
+    # directionnel après filtrage MST (use_mst=True par défaut) alors que
+    # la relation est censée être non-dirigée.
+    filtered_edge_index = torch.cat([filtered_edge_index, filtered_edge_index.flip(0)], dim=1)
+    filtered_edge_weight = torch.cat([filtered_edge_weight, filtered_edge_weight])
+    
     return filtered_edge_index, filtered_edge_weight
 
 
@@ -203,7 +330,9 @@ def build_audio_audio_edges(
         return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.float)
     
     # Matrice de similarité acoustique
-    sim_matrix = compute_cosine_similarity_matrix(audio_features)
+    sim_matrix = compute_audio_dtw_similarity_matrix(
+    audio_features
+)
     
     # Créer le masque des arêtes
     # 1. Même transcription → arête avec poids 1.0
@@ -244,7 +373,8 @@ def build_audio_audio_edges(
             edge_weight, 
             N,
             method=backbone_method,
-            ensure_connectivity=ensure_connectivity
+            ensure_connectivity=ensure_connectivity,
+            sim_matrix=sim_matrix,  # FIX (cf. discussion, point 2)
         )
     
     return edge_index, edge_weight

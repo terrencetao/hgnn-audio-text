@@ -1,6 +1,6 @@
 """
 build_save_graph.py
-Construction et sauvegarde du graphe pour le dataset EWONDO.
+Construction et sauvegarde du graphe pour le dataset.
 À exécuter une seule fois.
 """
 
@@ -269,23 +269,22 @@ class GraphBuilder:
         frame_features: torch.Tensor,
         linguistic_features: torch.Tensor,
         config: GraphBuildConfig,
-        pooling_method: str = "mean"
     ):
-        print(f"\n🏗️ Construction du graphe (pooling: {pooling_method})...")
+        print(f"\n🏗️ Construction du graphe ...")
         
-        if pooling_method == "mean":
-            audio_features = frame_features.mean(dim=1)
-        elif pooling_method == "max":
-            audio_features = frame_features.max(dim=1)[0]
-        elif pooling_method == "first":
-            audio_features = frame_features[:, 0, :]
-        else:
-            raise ValueError(f"Méthode de pooling inconnue: {pooling_method}")
+        #if pooling_method == "mean":
+        #    audio_features = frame_features.mean(dim=1)
+        #elif pooling_method == "max":
+        #    audio_features = frame_features.max(dim=1)[0]
+        #elif pooling_method == "first":
+        #    audio_features = frame_features[:, 0, :]
+        #else:
+        #    raise ValueError(f"Méthode de pooling inconnue: {pooling_method}")
         
-        print(f"   Features audio poolées: {audio_features.shape}")
+        print(f"   Features audio poolées: {frame_features.shape}")
         
         graph = build_heterogeneous_graph(
-            audio_features=audio_features,
+            audio_features=frame_features,
             linguistic_features=linguistic_features,
             audio_transcription_ids=self.transcription_ids,
             config=config
@@ -312,6 +311,17 @@ class GraphBuilder:
     ):
         features_dir = self.output_dir / 'features'
         model = self.backbone_name.split('/')[1]
+        
+        # FIX (cf. discussion, point 4) : le nom du fichier de cache du
+        # graphe encode maintenant les hyperparamètres qui déterminent sa
+        # construction (seuil, MST, méthode de backbone, pooling utilisé
+        # pour les arêtes). AVANT, seuls `model` et `representation_type`
+        # étaient encodés -- relancer avec un seuil différent sans
+        # `force_rebuild=True` réutilisait SILENCIEUSEMENT l'ancien
+        # graphe, sans avertissement, ce qui aurait invalidé toute
+        # exploration de cet hyperparamètre en validation croisée.
+        #mst_tag = f"mst{config.backbone_method}" if config.use_mst else "nomst"
+        #graph_variant_tag = f"thr{config.similarity_threshold}_{mst_tag}"
         
         # Définir les chemins des fichiers
         frame_features_path = features_dir / f'frame_features_{model}.pt'
@@ -414,8 +424,7 @@ class GraphBuilder:
             graph = self.build_graph_from_frame_features(
                 frame_features=frame_features,
                 linguistic_features=linguistic_features,
-                config=config,
-                pooling_method=pooling_method
+                config=config
             )
             (self.output_dir / 'graph').mkdir(parents=True, exist_ok=True)
             torch.save(graph, graph_path)
@@ -446,7 +455,6 @@ class GraphBuilder:
                 'id_to_transcription': self.id_to_transcription,
                 'backbone_name': self.backbone_name,
                 'representation_type': representation_type.value,
-                'pooling_method': pooling_method,
                 'frame_features_shape': list(frame_features[0].shape),
                 'linguistic_features_shape': list(linguistic_features[0].shape),
                 'note': 'frame_features sont les features TRAMES brutes (N, T, D) - NON poolées'
@@ -494,7 +502,6 @@ def build_and_save_graph(config_path: str = "config/default.yaml", **kwargs):
     use_mst = to_bool(graph_build['use_mst'])
     backbone_method = graph_build.get('backbone_method', 'mst')
     ensure_connectivity = to_bool(graph_build.get('ensure_connectivity', True))
-    pooling_method = graph_build.get('pooling_for_graph', 'mean')
     
     representation_type = config['linguistic']['representation']
     device = config['training'].get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
@@ -518,8 +525,6 @@ def build_and_save_graph(config_path: str = "config/default.yaml", **kwargs):
             representation_type = value
         elif key == 'device':
             device = value
-        elif key == 'pooling':
-            pooling_method = value
     
     print("="*60)
     print("CONSTRUCTION DU GRAPHE HÉTÉROGÈNE")
@@ -529,7 +534,6 @@ def build_and_save_graph(config_path: str = "config/default.yaml", **kwargs):
     print(f"🔧 Backbone: {backbone_name}")
     print(f"📊 Threshold: {similarity_threshold}")
     print(f"🌳 Use MST: {use_mst}")
-    print(f"📦 Pooling: {pooling_method}")
     print(f"💻 Device: {device}")
     
     # 1. Charger le dataset
@@ -576,7 +580,6 @@ def build_and_save_graph(config_path: str = "config/default.yaml", **kwargs):
         representation_type=rep_type,
         batch_size=batch_size,
         num_workers=num_workers,
-        pooling_method=pooling_method,
         save_features=True
     )
     

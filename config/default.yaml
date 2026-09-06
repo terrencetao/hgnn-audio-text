@@ -43,7 +43,6 @@ graph:
     use_mst: true
     backbone_method: "mst"
     ensure_connectivity: true
-    pooling_for_graph: "mean"  # mean, max, first
   
   # Architecture du GNN
   gnn_layers: 5
@@ -68,8 +67,8 @@ training:
 # PERTES
 # ============================================================================
 loss_weights:
-  alpha: 0.01  # L_acoustic
-  beta: 0.01   # L_reg
+  alpha: 0.1  # L_acoustic
+  beta: 0.1   # L_reg
 
 # ============================================================================
 # DROPOUT DE MODALITÉ
