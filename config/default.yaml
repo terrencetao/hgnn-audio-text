@@ -46,7 +46,7 @@ graph:
     pooling_for_graph: "mean"  # mean, max, first
   
   # Architecture du GNN
-  gnn_layers: 2
+  gnn_layers: 5
 
 # ============================================================================
 # ENTRAÎNEMENT
@@ -68,8 +68,8 @@ training:
 # PERTES
 # ============================================================================
 loss_weights:
-  alpha: 0.1  # L_acoustic
-  beta: 0.1   # L_reg
+  alpha: 0.01  # L_acoustic
+  beta: 0.01   # L_reg
 
 # ============================================================================
 # DROPOUT DE MODALITÉ

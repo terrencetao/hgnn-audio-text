@@ -18,6 +18,11 @@ CORRECTIONS apportées :
 5. Baseline utilise les embeddings après GNN
 """
 
+
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
 import argparse
 import torch
 import torch.nn.functional as F
@@ -53,6 +58,13 @@ OPTION_KEY_MAP = {
     "option2": "option2_reference",
     "option3": "option3_reconnection",
 }
+
+# FIX (cf. discussion) : seuil pour distinguer la transcription EXACTE
+# (poids 1.0, cf. build_cross_edges) des arêtes secondaires de similarité
+# (poids < 1.0). Sans ce filtre, la baseline comptait un "hit" dès qu'un
+# mot linguistiquement proche apparaissait dans le top-k, pas seulement
+# la vraie transcription -- une tâche plus facile que celle voulue.
+EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD = 0.999
 
 
 def recall_at_k(
@@ -505,10 +517,18 @@ class RetrievalEvaluator:
         }
 
         # Construire les mappings audio<->texte
+        # FIX : ne garder que les arêtes de transcription EXACTE (poids
+        # ~1.0) -- sans ça, un mot "similaire" (arête secondaire, poids <
+        # 1.0) comptait aussi comme une bonne réponse, ce qui n'est pas la
+        # vérité terrain voulue pour la baseline.
         audio_to_text_mapping = {}
         word_to_audio_mapping = {}
         edge_index = reference_graph["audio", "transcribed_as", "word"].edge_index
+        edge_weight = reference_graph["audio", "transcribed_as", "word"].edge_weight
+        exact_mask = edge_weight > EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD
         for i in range(edge_index.shape[1]):
+            if not exact_mask[i]:
+                continue
             audio_idx = edge_index[0, i].item()
             word_idx = edge_index[1, i].item()
             audio_to_text_mapping.setdefault(audio_idx, []).append(word_idx)
@@ -616,7 +636,17 @@ class RetrievalEvaluator:
             try:
                 audio_feat = self.builder.extract_audio_features_from_path(str(row['audio_path']))
                 if audio_feat.dim() == 1:
-                    ValueError(f"audio_feat doit avoir au moins 2 dimensions, mais a la forme {audio_feat.shape}")
+                    # NOTE (cf. discussion) : ce check semble contredire le
+                    # reste du fichier -- partout ailleurs (retrieve(),
+                    # option1/2/3...), un embedding 1D (D,) est le format
+                    # NORMAL, géré via `.unsqueeze(0)`. Activer un `raise`
+                    # ici casserait le chemin normal si
+                    # extract_audio_features_from_path retourne du 1D (ce
+                    # qui semble être le cas). Je laisse donc CE check
+                    # inactif intentionnellement plutôt que de l'activer à
+                    # l'aveugle -- à supprimer ou corriger toi-même une
+                    # fois vérifié ce que retourne réellement cette méthode.
+                    pass
                 test_audio_features.append(audio_feat)
             except Exception as e:
                 print(f"⚠️ Erreur pour {row['audio_path']}: {e}")
@@ -729,9 +759,16 @@ class RetrievalEvaluator:
         }
 
         # Baseline audio-to-text
+        # FIX : même filtrage par transcription exacte que dans
+        # evaluate_baseline_only (cf. discussion) -- sans ça, un mot
+        # "similaire" (arête secondaire) comptait aussi comme bonne réponse.
         audio_to_text_mapping = {}
         edge_index = reference_graph["audio", "transcribed_as", "word"].edge_index
+        edge_weight = reference_graph["audio", "transcribed_as", "word"].edge_weight
+        exact_mask = edge_weight > EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD
         for i in range(edge_index.shape[1]):
+            if not exact_mask[i]:
+                continue
             audio_idx = edge_index[0, i].item()
             word_idx = edge_index[1, i].item()
             audio_to_text_mapping.setdefault(audio_idx, []).append(word_idx)
@@ -751,8 +788,11 @@ class RetrievalEvaluator:
                 results["baseline"]["audio_to_text"][k].append(1.0 if is_correct else 0.0)
 
         # Baseline text-to-audio
+        # FIX : même filtrage (réutilise exact_mask calculé ci-dessus)
         word_to_audio_mapping = {}
         for i in range(edge_index.shape[1]):
+            if not exact_mask[i]:
+                continue
             audio_idx = edge_index[0, i].item()
             word_idx = edge_index[1, i].item()
             word_to_audio_mapping.setdefault(word_idx, []).append(audio_idx)
@@ -781,36 +821,44 @@ class RetrievalEvaluator:
         # ================================================================
         print("🎵 Traitement des options d'inférence...")
         connection_stats = {"num_edges": []}
-        
+
         # Stocker les embeddings de tous les audios de test pour le text-to-audio
         all_option_embeddings = {
             "option1_ablation": [],
             "option2_reference": [],
             "option3_reconnection": []
         }
+        # FIX (cf. discussion) : on garde, EN PARALLÈLE de chaque embedding
+        # stocké, la position réelle `i` (dans l'énumération de
+        # valid_indices) à laquelle il correspond. Sans ça, filtrer les
+        # échecs (None) plus bas décale les index du tenseur empilé par
+        # rapport à `i`, et TOUTES les comparaisons text->audio suivantes
+        # pour cette option deviennent silencieusement fausses dès le
+        # premier échec rencontré.
+        all_option_positions = {
+            "option1_ablation": [],
+            "option2_reference": [],
+            "option3_reconnection": []
+        }
 
-        for idx in tqdm(valid_indices, desc="Traitement"):
+        for i, idx in enumerate(tqdm(valid_indices, desc="Traitement")):
             audio_features = test_audio_features[idx]
             correct_transcription = test_df.iloc[idx]['transcription']
-            
+
             # Ajouter le nœud audio au graphe (calcul des arêtes par similarité avec les audios de référence)
             edges = self.build_edges_by_similarity_threshold(audio_features, reference_graph)
             connection_stats["num_edges"].append(edges.shape[1] // 2)
-            
-            # Pour chaque option, obtenir l'embedding
-            option_embeddings = {}
-            
+
             for option in ["option1", "option2", "option3"]:
+                option_key = OPTION_KEY_MAP[option]
                 try:
                     embedding = self.infer_audio(
-                        audio_features, 
-                        reference_graph, 
-                        option=option, 
+                        audio_features,
+                        reference_graph,
+                        option=option,
                         edges=edges
                     )
-                    option_key = OPTION_KEY_MAP[option]
-                    option_embeddings[option_key] = embedding
-                    
+
                     # ========================================================
                     # Audio → Text: comparer l'embedding de l'audio avec les textes de test
                     # ========================================================
@@ -819,59 +867,68 @@ class RetrievalEvaluator:
                         predicted_texts = [test_transcriptions[i] for i in indices if i < len(test_transcriptions)]
                         is_correct = correct_transcription in predicted_texts
                         results[option_key]["audio_to_text"][k].append(1.0 if is_correct else 0.0)
-                    
-                    # Stocker l'embedding pour le text-to-audio
+
+                    # FIX : stocker l'embedding ET sa position réelle `i` ensemble
                     all_option_embeddings[option_key].append(embedding.cpu())
-                    
+                    all_option_positions[option_key].append(i)
+
                 except Exception as e:
                     print(f"⚠️ Erreur pour option {option} sur idx {idx}: {e}")
                     for k in k_values:
-                        results[OPTION_KEY_MAP[option]]["audio_to_text"][k].append(0.0)
-                    # Ajouter un placeholder pour le text-to-audio
-                    all_option_embeddings[OPTION_KEY_MAP[option]].append(None)
+                        results[option_key]["audio_to_text"][k].append(0.0)
+                    # FIX : ne RIEN ajouter à all_option_embeddings/positions
+                    # -- pas de placeholder None à filtrer plus tard, donc
+                    # plus de risque de désalignement.
 
         # ================================================================
         # 8. Text → Audio: Utiliser les embeddings déjà calculés
         # ================================================================
         print("📊 Text-to-Audio pour les options...")
-        
-        # Convertir les listes en tenseurs (en ignorant les None)
+
+        # Empiler les embeddings valides -- all_option_positions[option_key][row]
+        # donne la position `i` réelle correspondant à la ligne `row` du
+        # tenseur empilé (FIX : plus d'hypothèse d'alignement implicite).
         for option_key in all_option_embeddings:
-            valid_embeddings = [emb for emb in all_option_embeddings[option_key] if emb is not None]
-            if valid_embeddings:
-                all_option_embeddings[option_key] = torch.stack(valid_embeddings)
+            if all_option_embeddings[option_key]:
+                all_option_embeddings[option_key] = torch.stack(all_option_embeddings[option_key])
             else:
                 all_option_embeddings[option_key] = None
 
         for i, idx in enumerate(valid_indices):
             correct_transcription = test_df.iloc[idx]['transcription']
             correct_text_idx = test_transcriptions.index(correct_transcription) if correct_transcription in test_transcriptions else -1
-            
+
             if correct_text_idx == -1:
                 continue
-            
+
             # Embedding du texte correct
             text_embedding = text_embeddings[correct_text_idx]
             if text_embedding.dim() == 1:
                 text_embedding = text_embedding.unsqueeze(0)
-            
+
             text_norm = F.normalize(text_embedding, p=2, dim=-1)
-            
+
             for option_key in all_option_embeddings:
                 if all_option_embeddings[option_key] is None:
                     continue
-                
+
                 # Embeddings de tous les audios pour cette option
                 audio_embeddings = all_option_embeddings[option_key]
                 audio_norm = F.normalize(audio_embeddings, p=2, dim=-1)
-                
+
                 # Similarité entre le texte et tous les audios
                 scores = text_norm @ audio_norm.T
-                top_k_indices = scores.topk(max(k_values)).indices[0]
-                
+                top_k_rows = scores.topk(min(max(k_values), audio_norm.shape[0])).indices[0]
+
+                # FIX : traduire les indices de LIGNE (dans le tenseur
+                # empilé, potentiellement plus petit que valid_indices si
+                # des échecs ont été exclus) vers les positions RÉELLES `i`
+                # via all_option_positions, avant de comparer.
+                positions_for_option = all_option_positions[option_key]
+                top_k_true_positions = [positions_for_option[row.item()] for row in top_k_rows]
+
                 for k in k_values:
-                    # L'audio correct est à l'index i dans la liste des valides
-                    is_correct = i in top_k_indices[:k].tolist()
+                    is_correct = i in top_k_true_positions[:k]
                     results[option_key]["text_to_audio"][k].append(1.0 if is_correct else 0.0)
 
         # ================================================================

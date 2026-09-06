@@ -12,11 +12,25 @@ Paramètres explorés:
 - k_values: Nombre de voisins pour le retrieval
 - representation_type: Type de représentation linguistique
 
-test_csv est OPTIONNEL - si non fourni, exécute uniquement la baseline.
+Ces expériences sont spécifiques à un backbone et un modèle linguistique donnés.
+
+CORRECTIONS apportées (cf. discussion) par rapport à la version précédente :
+
+1. `from retrieval import RetrievalEvaluator` référençait un module à la
+   racine du projet, incohérent avec la structure réelle où le fichier vit
+   dans `evaluation/retrieval.py`. Corrigé en `from evaluation.retrieval
+   import RetrievalEvaluator`.
+
+2. `best_configs` et `summary_df` étaient référencés dans la construction
+   de `global_summary`, hors du bloc `if all_results:` où ils sont
+   définis -- si TOUTES les expériences de la grille échouent (all_results
+   vide), le script levait un NameError au lieu de sauvegarder un résumé
+   d'échec informatif. Ajout d'une garde explicite.
 """
 
 import sys
 from pathlib import Path
+# Ajouter le dossier parent au path (racine du projet, depuis scripts/)
 sys.path.append(str(Path(__file__).parent.parent))
 
 import argparse
@@ -31,6 +45,7 @@ from omegaconf import OmegaConf
 from typing import List, Dict, Any
 import itertools
 
+# CORRECTION point 1 : import path cohérent avec evaluation/retrieval.py
 from evaluation.retrieval import RetrievalEvaluator
 from graph.similarity import LinguisticRepresentation
 
@@ -43,6 +58,56 @@ def get_model_names(config_path: str) -> tuple:
     representation_name = config['linguistic']['representation']
     threshold = config.graph.build.similarity_threshold
     return backbone_model_name, representation_name, threshold
+
+
+def run_single_experiment(
+    config_path: str,
+    checkpoint_path: str,
+    test_csv_path: str,
+    reference_fraction: float,
+    max_edges_per_node: int,
+    k_values: List[int],
+    representation_type: str,
+    seed: int,
+    output_dir: Path
+) -> Dict[str, Any]:
+    """
+    Exécute une expérience unique avec les paramètres donnés.
+    """
+    rep_type = LinguisticRepresentation(representation_type)
+
+    evaluator = RetrievalEvaluator(
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        representation_type=rep_type,
+        max_edges_per_node=max_edges_per_node,
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    results = evaluator.evaluate_on_test_set(
+        reference_fraction=reference_fraction,
+        test_csv_path=test_csv_path,
+        k_values=k_values,
+        seed=seed
+    )
+
+    backbone_name, rep_name, threshold = get_model_names(config_path)
+    results["experiment_params"] = {
+        "backbone_model": backbone_name,
+        "representation_model": rep_name,
+        "similarity_threshold": threshold,  # Fixé par la config
+        "reference_fraction": reference_fraction,
+        "max_edges_per_node": max_edges_per_node,
+        "k_values": k_values,
+        "representation_type": representation_type,
+        "seed": seed,
+        "config_path": config_path,
+        "checkpoint_path": checkpoint_path,
+        "test_csv_path": test_csv_path,
+        "timestamp": datetime.now().isoformat()
+    }
+
+    return results
 
 
 def save_experiment_results(
@@ -67,9 +132,7 @@ def save_experiment_results(
         if key in ["metadata", "experiment_params"]:
             json_data[key] = value
         elif isinstance(value, dict):
-            json_data[key] = {}
-            for direction, scores in value.items():
-                json_data[key][direction] = {str(k): float(v) for k, v in scores.items()}
+            json_data[key] = {str(k): float(v) for k, v in value.items()}
         else:
             json_data[key] = value
 
@@ -77,54 +140,6 @@ def save_experiment_results(
         json.dump(json_data, f, indent=2)
 
     return pt_path
-
-
-def run_single_experiment(
-    config_path: str,
-    checkpoint_path: str,
-    test_csv_path: str,
-    reference_fraction: float,
-    max_edges_per_node: int,
-    k_values: List[int],
-    representation_type: str,
-    seed: int,
-    output_dir: Path
-) -> Dict[str, Any]:
-    """Exécute une expérience unique avec les paramètres donnés."""
-    rep_type = LinguisticRepresentation(representation_type)
-
-    evaluator = RetrievalEvaluator(
-        config_path=config_path,
-        checkpoint_path=checkpoint_path,
-        representation_type=rep_type,
-        max_edges_per_node=max_edges_per_node,
-        device="cuda" if torch.cuda.is_available() else "cpu"
-    )
-
-    results = evaluator.evaluate_on_test_set(
-        reference_fraction=reference_fraction,
-        test_csv_path=test_csv_path,
-        k_values=k_values,
-        seed=seed
-    )
-
-    backbone_name, rep_name, threshold = get_model_names(config_path)
-    results["experiment_params"] = {
-        "backbone_model": backbone_name,
-        "representation_model": rep_name,
-        "similarity_threshold": threshold,
-        "reference_fraction": reference_fraction,
-        "max_edges_per_node": max_edges_per_node,
-        "k_values": k_values,
-        "representation_type": representation_type,
-        "seed": seed,
-        "config_path": config_path,
-        "checkpoint_path": checkpoint_path,
-        "test_csv_path": test_csv_path,
-        "timestamp": datetime.now().isoformat()
-    }
-
-    return results
 
 
 def run_grid_experiment(
@@ -139,17 +154,20 @@ def run_grid_experiment(
     seeds: List[int] = [42],
     verbose: bool = True
 ) -> Dict[str, Any]:
-    """Exécute une grille d'expériences."""
+    """
+    Exécute une grille d'expériences.
+
+    Le seuil de similarité est fixé par la config et N'EST PAS exploré.
+    """
     backbone_model, rep_model, threshold = get_model_names(config_path)
 
     print(f"\n🎯 EXPÉRIENCES POUR:")
     print(f"   - Backbone: {backbone_model}")
     print(f"   - Représentation linguistique: {rep_model}")
     print(f"   - Seuil de similarité (fixé): {threshold}")
-    if test_csv_path is None:
-        print(f"   - Mode: BASELINE UNIQUEMENT")
     print("=" * 80)
 
+    # Créer toutes les combinaisons (sans le seuil qui est fixé)
     param_combinations = list(itertools.product(
         reference_fractions,
         max_edges_per_nodes,
@@ -165,8 +183,6 @@ def run_grid_experiment(
     for i, (ref_frac, max_edges, rep_type, seed) in enumerate(tqdm(param_combinations, desc="Expériences")):
         try:
             exp_name = f"retrieval_{backbone_model}_{rep_model}_f{ref_frac}_thr{threshold}_max{max_edges}_{rep_type}_seed{seed}"
-            if test_csv_path is None:
-                exp_name += "_baseline_only"
 
             results = run_single_experiment(
                 config_path=config_path,
@@ -184,14 +200,8 @@ def run_grid_experiment(
             all_results[exp_name] = results
 
             if verbose:
-                r1_audio_text = results.get("baseline", {}).get("audio_to_text", {}).get(1, 0.0)
-                r1_text_audio = results.get("baseline", {}).get("text_to_audio", {}).get(1, 0.0)
-                if "option2_reference" in results:
-                    r1_opt2_audio = results["option2_reference"].get("audio_to_text", {}).get(1, 0.0)
-                    r1_opt2_text = results["option2_reference"].get("text_to_audio", {}).get(1, 0.0)
-                    print(f"✅ {i+1}/{len(param_combinations)}: R@1 baseline: {r1_audio_text:.4f}/{r1_text_audio:.4f} | opt2: {r1_opt2_audio:.4f}/{r1_opt2_text:.4f}")
-                else:
-                    print(f"✅ {i+1}/{len(param_combinations)}: R@1 baseline: {r1_audio_text:.4f}/{r1_text_audio:.4f}")
+                recall1 = results.get("option2_reference", {}).get(1, 0.0)
+                print(f"✅ {i+1}/{len(param_combinations)}: {exp_name} -> R@1={recall1:.4f}")
 
         except Exception as e:
             failed_experiments.append({
@@ -216,6 +226,10 @@ def run_grid_experiment(
     print(f"Réussies: {len(all_results)}")
     print(f"Échouées: {len(failed_experiments)}")
 
+    # CORRECTION point 2 : summary_df/best_configs initialisés AVANT le
+    # bloc conditionnel, pour être toujours définis (même vides) au
+    # moment de construire global_summary plus bas -- évite le NameError
+    # si all_results est vide (toutes les expériences ont échoué).
     summary_df = pd.DataFrame()
     best_configs = pd.DataFrame()
 
@@ -223,48 +237,37 @@ def run_grid_experiment(
         summary_data = []
         for exp_name, results in all_results.items():
             params = results["experiment_params"]
-
-            row_data = {
+            summary_data.append({
                 "experiment": exp_name,
                 "backbone": params["backbone_model"],
                 "representation": params["representation_model"],
                 "similarity_threshold": params["similarity_threshold"],
                 "reference_fraction": params["reference_fraction"],
                 "max_edges_per_node": params["max_edges_per_node"],
+                "R@1_option1": results.get("option1_ablation", {}).get(1, 0.0),
+                "R@1_option2": results.get("option2_reference", {}).get(1, 0.0),
+                "R@1_option3": results.get("option3_reconnection", {}).get(1, 0.0),
+                "R@5_option2": results.get("option2_reference", {}).get(5, 0.0),
+                "R@10_option2": results.get("option2_reference", {}).get(10, 0.0),
+                "avg_edges": results.get("metadata", {}).get("avg_edges_per_query", 0),
                 "num_queries": results.get("metadata", {}).get("num_test_samples", 0)
-            }
-
-            # Ajouter les métriques pour chaque condition et direction
-            for condition in ["baseline", "option1_ablation", "option2_reference", "option3_reconnection"]:
-                if condition in results:
-                    for direction in ["audio_to_text", "text_to_audio"]:
-                        if direction in results[condition]:
-                            for k in k_values:
-                                metric_name = f"{condition}_{direction}_R@{k}"
-                                row_data[metric_name] = results[condition][direction].get(k, 0.0)
-
-            summary_data.append(row_data)
+            })
 
         summary_df = pd.DataFrame(summary_data)
         summary_path = output_dir / "retrieval" / f"experiments_summary_{backbone_model}_{rep_model}_thr{threshold}.csv"
         summary_df.to_csv(summary_path, index=False)
 
-        print("\n🏆 MEILLEURES CONFIGURATIONS (R@1 sur Option 2, audio→text):")
+        print("\n🏆 MEILLEURES CONFIGURATIONS (R@1 sur Option 2):")
         print("-" * 80)
-        r1_col = "option2_reference_audio_to_text_R@1"
-        if r1_col in summary_df.columns:
-            best_configs = summary_df.nlargest(5, r1_col)
-            for _, row in best_configs.iterrows():
-                print(f"  R@1={row[r1_col]:.4f} | ref_frac={row['reference_fraction']:.2f} | "
-                      f"max_edges={row['max_edges_per_node']} | text→audio={row.get('option2_reference_text_to_audio_R@1', 0):.4f}")
+        best_configs = summary_df.nlargest(5, "R@1_option2")
+        for _, row in best_configs.iterrows():
+            print(f"  R@1={row['R@1_option2']:.4f} | ref_frac={row['reference_fraction']:.2f} | "
+                  f"max_edges={row['max_edges_per_node']}")
 
         print("\n📈 STATISTIQUES:")
         print("-" * 80)
-        for condition in ["baseline", "option2_reference"]:
-            for direction in ["audio_to_text", "text_to_audio"]:
-                col = f"{condition}_{direction}_R@1"
-                if col in summary_df.columns:
-                    print(f"  {condition} {direction} - Moyenne: {summary_df[col].mean():.4f} ± {summary_df[col].std():.4f}")
+        print(f"  R@1 Option 2 - Moyenne: {summary_df['R@1_option2'].mean():.4f} ± {summary_df['R@1_option2'].std():.4f}")
+        print(f"  R@1 Option 2 - Min/Max: {summary_df['R@1_option2'].min():.4f} / {summary_df['R@1_option2'].max():.4f}")
     else:
         print("\n⚠️  Aucune expérience réussie -- pas de résumé statistique à produire.")
 
@@ -275,6 +278,7 @@ def run_grid_experiment(
         "total_experiments": len(param_combinations),
         "successful": len(all_results),
         "failed": len(failed_experiments),
+        # CORRECTION point 2 : garde explicite, plus de NameError possible
         "best_config": best_configs.iloc[0].to_dict() if not summary_df.empty and not best_configs.empty else None,
         "timestamp": datetime.now().isoformat(),
         "failed_experiments": failed_experiments
@@ -295,8 +299,7 @@ def main():
 
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--test_csv", type=str, default=None,
-                       help="Fichier CSV de test (optionnel - si non fourni, exécute uniquement la baseline)")
+    parser.add_argument("--test_csv", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="./output")
 
     # Paramètres à explorer
@@ -333,7 +336,6 @@ def main():
     print(f"Backbone: {backbone_model}")
     print(f"Représentation linguistique: {rep_model}")
     print(f"Seuil de similarité (config): {threshold}")
-    print(f"Test CSV: {args.test_csv if args.test_csv else '⚠️  Non fourni - mode baseline uniquement'}")
     print(f"Output: {output_dir}")
     print("=" * 80)
 
@@ -364,21 +366,16 @@ def main():
         )
 
         exp_name = f"retrieval_{backbone_model}_{rep_model}_f{args.reference_fraction}_thr{threshold}_max{args.max_edges_per_node}_seed{args.seed}"
-        if args.test_csv is None:
-            exp_name += "_baseline_only"
-
         save_experiment_results(results, output_dir, exp_name)
 
         print("\n📊 Résultats:")
         print("-" * 40)
-        for condition in results:
-            if condition in ["metadata", "experiment_params"]:
+        for option, scores in results.items():
+            if option in ["metadata", "experiment_params"]:
                 continue
-            print(f"\n{condition}:")
-            for direction in results[condition]:
-                print(f"  {direction}:")
-                for k, score in results[condition][direction].items():
-                    print(f"    Recall@{k}: {score:.4f}")
+            print(f"\n{option}:")
+            for k, score in scores.items():
+                print(f"  Recall@{k}: {score:.4f}")
 
         print(f"\n✅ Résultats sauvegardés dans {output_dir / 'retrieval'}")
 

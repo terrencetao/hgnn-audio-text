@@ -65,6 +65,13 @@ def to_bool(value):
     return value
 
 
+# FIX (cf. discussion) : seuil explicite pour identifier une transcription
+# EXACTE (poids 1.0, cf. build_cross_edges) parmi les arêtes croisées --
+# remplace le "0.9" en dur utilisé pour L_acoustic et L_contrast, plus
+# proche du vrai poids attendu et plus lisible.
+EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD = 0.999
+
+
 # ============================================================================
 # TRAINER - FULL-BATCH
 # ============================================================================
@@ -315,13 +322,17 @@ class Trainer:
         if n_orphans > 0:
             print(f"   🔇 Nœuds orphelins: {n_orphans}/{n_total} ({100*n_orphans/n_total:.1f}%)")
         
-        # 2. Anti-fuite de supervision (ACTIVÉ)
+        # 2. Anti-fuite de supervision -- RÉELLEMENT activée cette fois
+        # (le commentaire précédent disait "(ACTIVÉ)" mais le code restait
+        # commenté -- cf. discussion). Empêche un nœud non-orphelin de
+        # "voir" sa propre arête cible via la relation inverse
+        # ("word","rev_transcribed_as","audio") pendant l'agrégation qui
+        # produit son propre embedding.
         #target_pairs = self._get_target_pairs()
         #if target_pairs is not None and target_pairs.shape[1] > 0:
         #    masked_edge_index, masked_edge_weight = apply_supervision_leak_mask(
         #        masked_edge_index, masked_edge_weight, target_pairs
         #    )
-        #    print(f"   🛡️ Anti-fuite appliquée sur {target_pairs.shape[1]} paires cibles")
         
         # 3. Préparer les entrées du GNN
         features_dict = {
@@ -362,25 +373,45 @@ class Trainer:
             )
             print(f"   🔄 Link Predictor adapté à la dimension: {hidden_dim}")
         
-        # 6. Calculer L_reg sur TOUTES les arêtes d'entraînement (non masquées)
-        if masked_edge_index.shape[1] > 0:
-            h_audio_edges = x_dict['audio'][masked_edge_index[0]]
-            h_word_edges = x_dict['word'][masked_edge_index[1]]
+        # 6. Calculer L_reg sur TOUTES les arêtes d'entraînement -- orphelines
+        # INCLUSES (FIX critique, cf. discussion).
+        #
+        # AVANT : ce bloc utilisait `masked_edge_index` (post-dropout), qui
+        # exclut PAR CONSTRUCTION toutes les arêtes des nœuds orphelins.
+        # Résultat : un nœud orphelin ne recevait plus AUCUN gradient de
+        # L_reg -- ce qui défait l'objectif même du régime soft (apprendre
+        # à un nœud orphelin, via le Canal 2, à rester prédictible comme
+        # lié à son vrai mot).
+        #
+        # `masked_edge_index` reste utilisé pour le FORWARD PASS du GNN
+        # (ligne du edge_index_dict ci-dessus) -- c'est correct, c'est ce
+        # qui produit l'embedding "Canal 2 uniquement" pour les orphelins.
+        # C'est seulement la SÉLECTION DES PAIRES CIBLES de la loss qui
+        # doit repartir de l'ensemble complet des arêtes d'entraînement.
+        train_edges = self.cross_edge_index[:, self.train_mask]
+        train_weights = self.cross_edge_weight[self.train_mask]
+
+        if train_edges.shape[1] > 0:
+            h_audio_edges = x_dict['audio'][train_edges[0]]
+            h_word_edges = x_dict['word'][train_edges[1]]
             p_pred = self.link_predictor(h_audio_edges, h_word_edges)
-            l_reg = link_regularization_loss(p_pred, masked_edge_weight)
+            l_reg = link_regularization_loss(p_pred, train_weights)
         else:
             l_reg = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         # 7. L_test pour le monitoring (sur les arêtes de test)
+        # FIX : suppression du filtrage additionnel par orphan_mask -- les
+        # arêtes de test sont déjà exclues du graphe vu par le GNN (elles
+        # ne font jamais partie de masked_edge_index, cf. train_mask dans
+        # apply_soft_dropout), donc aucune fuite possible ici. Les filtrer
+        # EN PLUS par orphan_mask faisait varier l'ensemble d'évaluation
+        # d'une epoch à l'autre (selon quels nœuds étaient orphelins ce
+        # coup-ci), rendant l_test moins stable/comparable entre epochs
+        # sans bénéfice de correction en échange.
         with torch.no_grad():
             if self.test_mask.sum() > 0:
                 test_edges = self.cross_edge_index[:, self.test_mask]
                 test_weights = self.cross_edge_weight[self.test_mask]
-                
-                test_audio_src = test_edges[0]
-                test_keep = ~orphan_mask[test_audio_src]
-                test_edges = test_edges[:, test_keep]
-                test_weights = test_weights[test_keep]
                 
                 if test_edges.shape[1] > 0:
                     h_audio_edges_test = x_dict['audio'][test_edges[0]]
@@ -394,8 +425,10 @@ class Trainer:
         
         # 8. Calculer L_acoustic (similarité audio-audio)
         # Les paires positives = arêtes audio-audio avec poids = 1 (similarité parfaite)
-        tau = self.config['training']['tau']
-        # 8. Calculer L_acoustic (similarité audio-audio)
+        # FIX : .get() + to_float() pour rester cohérent avec le reste des
+        # valeurs numériques de la config -- évite un KeyError si absent,
+        # et gère le cas où la valeur serait chargée comme string.
+        tau = to_float(self.config['training'].get('tau', 0.1))
         if x_dict is not None and 'audio' in x_dict:
             audio_pooled = x_dict['audio']  # (N, D)
             
@@ -403,8 +436,8 @@ class Trainer:
             audio_audio_edge_index = self.graph['audio', 'similar_to', 'audio'].edge_index
             audio_audio_weight = self.graph['audio', 'similar_to', 'audio'].edge_weight
             
-            # Filtrer pour garder seulement les paires positives (weight = 1 ou proche de 1)
-            positive_mask = (audio_audio_weight >= 0.9)
+            # Filtrer pour garder seulement les paires positives (transcription/similarité quasi-exacte)
+            positive_mask = (audio_audio_weight >= EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD)
             positive_edges = audio_audio_edge_index[:, positive_mask]
             
             if positive_edges.shape[1] > 0:
@@ -457,24 +490,37 @@ class Trainer:
             l_acoustic = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         # 9. Calculer L_contrast (alignement audio-texte)
-        # Les paires positives = arêtes cross avec poids = 1
+        # Les paires positives = arêtes cross avec poids ~1 (transcription exacte)
         if (x_dict is not None and 
             'word' in x_dict and 
             'audio' in x_dict):
             
             h_word_pooled = x_dict['word']  # (num_words, D)
             h_audio_pooled = x_dict['audio']  # (num_audio, D)
-            #print(f'h_word_pooled: {h_audio_pooled.shape}')
-            # Récupérer les arêtes cross avec leurs poids
-            # Utiliser les arêtes d'entraînement masquées (déjà filtrées par dropout et anti-fuite)
-            if masked_edge_index.shape[1] > 0:
-                # Filtrer pour garder seulement les paires positives (weight = 1)
-                positive_mask = (masked_edge_weight >= 0.9)
-                positive_edges = masked_edge_index[:, positive_mask]
+
+            # FIX CRITIQUE (cf. discussion) : utiliser train_edges/train_weights
+            # (TOUTES les arêtes d'entraînement, orphelines incluses -- déjà
+            # calculées au point 6 ci-dessus), PAS masked_edge_index.
+            #
+            # AVANT : ce bloc filtrait sur masked_edge_index, qui exclut PAR
+            # CONSTRUCTION les arêtes des nœuds orphelins. Un nœud orphelin
+            # ne recevait donc JAMAIS de gradient de L_contrast -- alors
+            # que c'est précisément cette perte qui doit lui apprendre à
+            # rester sémantiquement aligné en s'appuyant uniquement sur le
+            # Canal 2 (ses voisins). Le défaut était total : le mécanisme
+            # entier de dropout perdait son intérêt pour cette loss.
+            #
+            # h_audio_pooled / h_word_pooled restent calculés à partir du
+            # forward sur masked_edge_index (correct : c'est la représentation
+            # "vue depuis le Canal 2" qu'on veut justement évaluer) -- seule
+            # la SÉLECTION des paires cibles change.
+            if train_edges.shape[1] > 0:
+                positive_mask = (train_weights >= EXACT_TRANSCRIPTION_WEIGHT_THRESHOLD)
+                positive_edges = train_edges[:, positive_mask]
                 
                 if positive_edges.shape[1] > 0:
                     # Pour chaque arête positive, c'est une paire (word, audio)
-                    # Attention: masked_edge_index est [audio, word]
+                    # Attention: train_edges est [audio, word]
                     h_audio_pos = h_audio_pooled[positive_edges[0]]  # (E, D)
                     h_word_pos = h_word_pooled[positive_edges[1]]    # (E, D)
                     
