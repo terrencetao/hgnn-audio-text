@@ -643,7 +643,7 @@ def run_cv_main():
         base_config = yaml.safe_load(f)
     
     # Configurer le mode rapide
-    epochs = cv_config.get('epochs', 20)
+    epochs = int(cv_config.get('epochs', 20))
     if args.quick:
         epochs = 5
         cv_config['alpha_grid'] = [0.001]
