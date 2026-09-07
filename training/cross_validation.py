@@ -252,7 +252,7 @@ def run_cross_validation(
         print(f"   tau={config.tau}, layers={config.gnn_layers}, lr={config.lr}, dropout={config.dropout}")
         
         try:
-            result = train_and_eval_fn(config, base_config_path)
+            result = train_and_eval_fn(config)
             
             results_by_config[config_id] = {
                 "alignment": result["alignment"],

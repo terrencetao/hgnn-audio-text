@@ -54,7 +54,9 @@ def compute_cosine_similarity_matrix(
 ) -> torch.Tensor:
     """
     Similarité cosine classique pour des vecteurs (N, D).
-    Utilisée pour les représentations linguistiques.
+
+    La représentation linguistique (LaBSE, AfriBERTa, etc.) est calculée
+    en amont ; cette fonction reste indépendante du modèle utilisé.
     """
 
     if features.dim() != 2:
@@ -512,3 +514,4 @@ def build_heterogeneous_graph(
         data["word", "rev_transcribed_as", "audio"].edge_weight = weight_cross
     
     return data
+

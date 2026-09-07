@@ -54,8 +54,8 @@ def contrastive_alignment_loss(
 
 def link_regularization_loss(p_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     """L_reg -- binary cross-entropy standard."""
-    #return F.mse_loss(p_pred, y_true)
-    return F.binary_cross_entropy(p_pred, y_true)
+    return F.mse_loss(p_pred, y_true)
+    #return F.binary_cross_entropy(p_pred, y_true)
 
 
 def total_loss(

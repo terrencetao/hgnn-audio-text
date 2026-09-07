@@ -6,20 +6,20 @@
 # ============================================================================
 
 # Poids des pertes
-alpha_grid: [0.001,0.1, 0.3, 0.5, 0.7, 0.9]
-beta_grid: [0.001, 0.3, 0.5, 0.7, 0.9]
+alpha_grid: [0.001,0.1, 0.3, 0.5, 0.7]
+beta_grid: [0.001, 0.3, 0.5, 0.7]
 # Température pour les pertes contrastives
 tau_grid: [0.1, 0.2, 0.5]
 
 # Dropout de modalité
-orphan_fraction_grid: [0.3]
+orphan_fraction_grid: [0.1,0.3]
 
 # Architecture du GNN
 gnn_layers_grid: [1, 2, 3]
 
 # Optimisation
-lr_grid: [0.0001]
-dropout_grid: [0.05, 0.1]
+lr_grid: [0.0001, 0.001. 0.01, 0.1]
+dropout_grid: [0.1]
 weight_decay_grid: [1e-6]
 
 # ============================================================================
@@ -39,7 +39,7 @@ by_speaker: false
 seed: 42
 
 # Nombre d'époques par entraînement (CV rapide)
-epochs: 5        0
+epochs: 100
 
 # ============================================================================
 # OPTIONS AVANCÉES

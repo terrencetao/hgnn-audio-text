@@ -1,0 +1,149 @@
+{
+  "structure": {
+    "nodes": {
+      "audio": 29,
+      "word": 29,
+      "total": 58
+    },
+    "edges": {
+      "audio_audio": 56,
+      "word_word": 0,
+      "cross": 29,
+      "total": 85
+    },
+    "features": {
+      "audio_dim": 467,
+      "word_dim": 768
+    },
+    "density": {
+      "audio_audio": 0.13793103448275862,
+      "word_word": 0.0,
+      "cross": 0.034482758620689655
+    }
+  },
+  "degrees": {
+    "audio_audio_degrees": {
+      "mean": 3.8620688915252686,
+      "std": 2.824941635131836,
+      "min": 2,
+      "max": 14,
+      "median": 2,
+      "distribution": {
+        "6": 3,
+        "2": 15,
+        "4": 8,
+        "14": 1,
+        "8": 1,
+        "10": 1
+      }
+    },
+    "cross_degrees_audio": {
+      "mean": 1.0,
+      "std": 0.0,
+      "min": 1,
+      "max": 1,
+      "median": 1,
+      "distribution": {
+        "1": 29
+      }
+    },
+    "cross_degrees_word": {
+      "mean": 1.0,
+      "std": 0.0,
+      "min": 1,
+      "max": 1,
+      "median": 1,
+      "distribution": {
+        "1": 29
+      }
+    }
+  },
+  "weights": {
+    "audio_audio_weights": {
+      "mean": 0.9794324040412903,
+      "std": 0.002956345910206437,
+      "min": 0.974126935005188,
+      "max": 0.9860331416130066,
+      "median": 0.9790476560592651,
+      "percentiles": {
+        "25": 0.976959154009819,
+        "50": 0.9790476858615875,
+        "75": 0.9818356931209564,
+        "90": 0.9833937883377075,
+        "95": 0.9839086532592773
+      }
+    },
+    "cross_weights": {
+      "mean": 1.0,
+      "std": 0.0,
+      "min": 1.0,
+      "max": 1.0,
+      "median": 1.0,
+      "percentiles": {
+        "25": 1.0,
+        "50": 1.0,
+        "75": 1.0,
+        "90": 1.0,
+        "95": 1.0
+      },
+      "exact_match_count": 29,
+      "exact_match_fraction": 1.0
+    }
+  },
+  "connectivity": {
+    "components": {
+      "n_components": 1,
+      "largest_component_size": 58,
+      "largest_component_fraction": 1.0,
+      "isolated_nodes": 0,
+      "component_sizes": [
+        58
+      ]
+    },
+    "orphan_audio": {
+      "count": 0,
+      "fraction": 0.0
+    }
+  },
+  "audio_features": {
+    "shape": [
+      29,
+      467,
+      1024
+    ],
+    "mean": -0.0001855323789641261,
+    "std": 0.16545884311199188,
+    "min": -1.405353307723999,
+    "max": 1.2588517665863037,
+    "norm_mean": 2.6500043869018555,
+    "norm_std": 2.400494337081909,
+    "rank": 0
+  },
+  "word_features": {
+    "shape": [
+      29,
+      768
+    ],
+    "mean": -0.015015541575849056,
+    "std": 0.03281183913350105,
+    "min": -0.11103538423776627,
+    "max": 0.08835157752037048,
+    "norm_mean": 1.0,
+    "norm_std": 4.141380216537982e-08,
+    "rank": 29
+  },
+  "cross_mapping": {
+    "audio_word_mapping": {
+      "mean_words_per_audio": 1.0,
+      "std_words_per_audio": 0.0,
+      "min_words_per_audio": 1,
+      "max_words_per_audio": 1,
+      "mean_audios_per_word": 1.0,
+      "std_audios_per_word": 0.0,
+      "min_audios_per_word": 1,
+      "max_audios_per_word": 1,
+      "audio_with_multiple_words": 0,
+      "word_with_multiple_audios": 0
+    }
+  }
+}

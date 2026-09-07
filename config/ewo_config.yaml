@@ -6,11 +6,11 @@
 # ============================================================================
 data:
   # Données brutes
-  raw_dir: "./data/raw/zulu"
-  metadata_csv: "./data/processed/zulu/metadata_full.csv"
+  raw_dir: "./data/raw/ewondo"
+  metadata_csv: "./data/processed/ewondo/metadata.csv"
   
   # Données traitées (graphe + features)
-  processed_dir: "./data/graphs/zulu"
+  processed_dir: "./data/graphs/ewondo"
   
   
   # Paramètres audio
@@ -18,7 +18,7 @@ data:
   max_length: None  # 10 secondes
   normalize: true
   
-output_dir: "./data/graphs/zulu"
+output_dir: "./data/graphs/ewondo"
 # ============================================================================
 # ENCODEUR ACOUSTIQUE
 # ============================================================================
@@ -39,13 +39,13 @@ linguistic:
 graph:
   # Construction du graphe
   build:
-    similarity_threshold: 0.6
+    similarity_threshold: 0.8
     use_mst: true
     backbone_method: "mst"
     ensure_connectivity: true
   
   # Architecture du GNN
-  gnn_layers: 1
+  gnn_layers: 2
 
 # ============================================================================
 # ENTRAÎNEMENT
@@ -62,6 +62,7 @@ training:
   test_edge_fraction: 0.1 
   output_dir: "./outputs/zulu"
   tau: 0.7
+  negative_ratio: 1.0
 
 # ============================================================================
 # PERTES

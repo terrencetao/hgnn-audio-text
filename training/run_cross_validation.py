@@ -23,349 +23,7 @@ from cross_validation import (
     run_cross_validation,
     create_cv_folds
 )
-from models.losses import link_regularization_loss
-from evaluation.intrinsic_metrics import alignment_uniformity_score
-from graph.dropout import create_test_mask, apply_soft_dropout, sample_orphan_mask
-from models.gnn import HeterogeneousGNN
-from models.link_predictor import LinkPredictor
-from models.losses import total_loss
 from training.train import Trainer
-
-
-class CVPipeline:
-    """
-    Pipeline de validation croisée.
-    """
-    
-    def __init__(
-        self,
-        config: dict,
-        default_config_path: str,
-        processed_dir: str,
-        output_dir: str,
-        fold: int = 0,
-        train_indices: list = None,
-        val_indices: list = None
-    ):
-        
-        self.config = config
-        self.processed_dir = Path(processed_dir)
-        self.output_dir = Path(output_dir) / f"fold_{fold}"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.fold = fold
-        self.train_indices = train_indices
-        self.val_indices = val_indices
-        
-        self.trainer = Trainer(default_config_path, self.processed_dir, self.output_dir) 
-        
-        self.device = torch.device(config['training']['device'])
-        
-        print(f"📁 Fold {fold}: {self.output_dir}")
-        self.model = self.config['encoder']['backbone'].split('/')[1]
-        self.representation = self.config['linguistic']['representation']
-        
-        self._load_data()
-        self._init_models()
-    
-    def _load_data(self):
-        """Charge le graphe et les features."""
-        try:
-            graph_path = self.processed_dir / f'graph/hetero_graph_{self.model}_{self.representation}.pt'
-            if not graph_path.exists():
-                raise FileNotFoundError(f"Graphe non trouvé: {graph_path}")
-            
-            self.graph = torch.load(graph_path, map_location=torch.device('cpu'))
-            if self.device.type == 'cuda':
-                self.graph = self.graph.to(self.device)
-            
-            features_dir = self.processed_dir / 'features'
-            frame_path = features_dir / f'frame_features_{self.model}.pt'
-            linguistic_path = features_dir / f'linguistic_features_{self.representation}.pt'
-            
-            if not frame_path.exists():
-                raise FileNotFoundError(f"frame_features.pt non trouvé: {frame_path}")
-            if not linguistic_path.exists():
-                raise FileNotFoundError(f"linguistic_features.pt non trouvé: {linguistic_path}")
-            
-            self.frame_features = torch.load(frame_path, map_location=torch.device('cpu'))
-            self.linguistic_features = torch.load(linguistic_path, map_location=torch.device('cpu'))
-            
-            if self.device.type == 'cuda':
-                self.frame_features = self.frame_features.to(self.device)
-                self.linguistic_features = self.linguistic_features.to(self.device)
-            
-            self.cross_edge_index = self.graph['audio', 'transcribed_as', 'word'].edge_index
-            self.cross_edge_weight = self.graph['audio', 'transcribed_as', 'word'].edge_weight
-            
-            test_fraction = self.config['training'].get('test_edge_fraction', 0.1)
-            seed = self.config['training'].get('seed', 42) + self.fold
-            self.train_mask, self.test_mask = create_test_mask(
-                self.cross_edge_index,
-                test_fraction=test_fraction,
-                seed=seed
-            )
-            
-            if self.train_indices is not None:
-                self.val_audio_mask = torch.zeros(self.frame_features.shape[0], dtype=torch.bool)
-                self.val_audio_mask[self.val_indices] = True
-                audio_src = self.cross_edge_index[0]
-                self.val_edge_mask = self.val_audio_mask[audio_src]
-                self.train_mask = self.train_mask & ~self.val_edge_mask
-                self.test_mask = self.test_mask & ~self.val_edge_mask
-            
-            print(f"   ✅ Données chargées: {self.frame_features.shape[0]} audios")
-            print(f"   ✅ Arêtes totales: {self.cross_edge_index.shape[1]}")
-            print(f"   ✅ Arêtes train: {self.train_mask.sum().item()}")
-            print(f"   ✅ Arêtes test: {self.test_mask.sum().item()}")
-            
-        except Exception as e:
-            print(f"   ❌ Erreur lors du chargement des données: {e}")
-            traceback.print_exc()
-            raise
-    
-    def _init_models(self):
-        """Initialise les modèles."""
-        try:
-            hidden_dim = self.config['encoder']['hidden_dim']
-            n_layers = self.config['graph']['gnn_layers']
-            dropout = self.config['training']['dropout']
-            lr = self.config['training']['lr_gnn']
-            weight_decay = self.config['training']['weight_decay']
-            
-            self.gnn = HeterogeneousGNN(
-                n_layers=n_layers,
-                dropout=dropout
-            ).to(self.device)
-            
-            self.link_predictor = LinkPredictor(hidden_dim).to(self.device)
-            
-            self.optimizer = torch.optim.AdamW(
-                list(self.gnn.parameters()) + list(self.link_predictor.parameters()),
-                lr=lr,
-                weight_decay=weight_decay
-            )
-            
-            print(f"   ✅ Modèles initialisés")
-            
-        except Exception as e:
-            print(f"   ❌ Erreur lors de l'initialisation des modèles: {e}")
-            traceback.print_exc()
-            raise
-    
-    def train_epoch_before(self, epoch: int) -> dict:
-        """Entraîne une époque."""
-        self.gnn.train()
-        self.link_predictor.train()
-        
-        alpha = self.config['loss_weights']['alpha']
-        beta = self.config['loss_weights']['beta']
-        grad_clip = self.config['training']['grad_clip']
-        orphan_fraction = self.config['dropout']['orphan_fraction']
-        
-        self.optimizer.zero_grad()
-        
-        try:
-            orphan_mask = sample_orphan_mask(
-                self.graph['audio'].num_nodes,
-                orphan_fraction,
-                self.device
-            )
-            
-            masked_edge_index, masked_edge_weight = apply_soft_dropout(
-                self.cross_edge_index,
-                self.cross_edge_weight,
-                orphan_mask,
-                train_mask=self.train_mask
-            )
-            
-            features_dict = {
-                'audio': self.frame_features,
-                'word': self.linguistic_features
-            }
-            attention_mask_dict = {
-                'audio': None,
-                'word': None
-            }
-            
-            edge_index_dict = {
-                ('audio', 'similar_to', 'audio'): self.graph['audio', 'similar_to', 'audio'].edge_index,
-                ('word', 'similar_to', 'word'): self.graph['word', 'similar_to', 'word'].edge_index,
-                ('audio', 'transcribed_as', 'word'): masked_edge_index,
-                ('word', 'rev_transcribed_as', 'audio'): masked_edge_index.flip(0)
-            }
-            
-            x_dict, pooled_dict = self.gnn(
-                features_dict=features_dict,
-                attention_mask_dict=attention_mask_dict,
-                edge_index_dict=edge_index_dict,
-                return_pooled=True
-            )
-            
-            if self.link_predictor.net[0].in_features != x_dict['audio'].shape[-1] * 2:
-                hidden_dim = x_dict['audio'].shape[-1]
-                self.link_predictor = LinkPredictor(hidden_dim).to(self.device)
-                lr = self.config['training']['lr_gnn']
-                weight_decay = self.config['training']['weight_decay']
-                self.optimizer = torch.optim.AdamW(
-                    list(self.gnn.parameters()) + list(self.link_predictor.parameters()),
-                    lr=lr,
-                    weight_decay=weight_decay
-                )
-            
-            if self.train_mask.sum() > 0:
-                train_edges = self.cross_edge_index[:, self.train_mask]
-                train_weights = self.cross_edge_weight[self.train_mask]
-                
-                h_audio_edges = x_dict['audio'][train_edges[0]]
-                h_word_edges = x_dict['word'][train_edges[1]]
-                p_pred = self.link_predictor(h_audio_edges, h_word_edges)
-                l_reg = link_regularization_loss(p_pred, train_weights)
-            else:
-                l_reg = torch.tensor(0.0, device=self.device)
-            
-            with torch.no_grad():
-                if self.test_mask.sum() > 0:
-                    test_edges = self.cross_edge_index[:, self.test_mask]
-                    test_weights = self.cross_edge_weight[self.test_mask]
-                    
-                    h_audio_edges_test = x_dict['audio'][test_edges[0]]
-                    h_word_edges_test = x_dict['word'][test_edges[1]]
-                    p_pred_test = self.link_predictor(h_audio_edges_test, h_word_edges_test)
-                    l_test = link_regularization_loss(p_pred_test, test_weights)
-                else:
-                    l_test = torch.tensor(0.0, device=self.device)
-            
-            l_acoustic = torch.tensor(0.0, device=self.device)
-            l_contrast = torch.tensor(0.0, device=self.device)
-            
-            loss = total_loss(l_acoustic, l_reg, l_contrast, alpha, beta)
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(self.gnn.parameters()) + list(self.link_predictor.parameters()),
-                grad_clip
-            )
-            self.optimizer.step()
-            
-            return {
-                'loss': loss.item(),
-                'reg_loss': l_reg.item(),
-                'test_loss': l_test.item()
-            }
-            
-        except Exception as e:
-            print(f"   ❌ Erreur dans train_epoch: {e}")
-            traceback.print_exc()
-            raise
-    
-    def train(self, epochs: int) -> dict:
-        """Boucle d'entraînement."""
-        best_loss = float('inf')
-        best_epoch = 0
-        all_metrics = []
-        
-        for epoch in range(epochs):
-            try:
-                loss, l_reg, l_test = self.trainer.train_epoch()
-                metrics = {
-                'loss': loss,
-                'reg_loss': l_reg,
-                'test_loss': l_test
-            }
-                metrics['epoch'] = epoch
-                all_metrics.append(metrics)
-                
-                if metrics['loss'] < best_loss:
-                    best_loss = metrics['loss']
-                    best_epoch = epoch
-                    self._save_checkpoint(epoch, metrics)
-                
-                if epoch % 10 == 0 or epoch == epochs - 1:
-                    print(f"   Epoch {epoch}: Loss={metrics['loss']:.4f}, "
-                          f"Reg={metrics['reg_loss']:.4f}, Test={metrics['test_loss']:.4f}")
-            except Exception as e:
-                print(f"   ❌ Erreur à l'epoch {epoch}: {e}")
-                continue
-        
-        return {
-            'best_loss': best_loss,
-            'best_epoch': best_epoch,
-            'all_metrics': all_metrics
-        }
-    
-    def _save_checkpoint(self, epoch: int, metrics: dict):
-        path = self.output_dir / 'best_model.pt'
-        torch.save({
-            'gnn_state_dict': self.gnn.state_dict(),
-            'link_predictor_state_dict': self.link_predictor.state_dict(),
-            'config': self.config,
-            'epoch': epoch,
-            'metrics': metrics,
-            'hidden_dim': self.gnn.hidden_dim
-        }, path)
-    
-    def evaluate(self) -> dict:
-        """Évalue le modèle sur les données de validation."""
-        self.gnn.eval()
-        self.link_predictor.eval()
-        
-        with torch.no_grad():
-            features_dict = {
-                'audio': self.frame_features,
-                'word': self.linguistic_features
-            }
-            attention_mask_dict = {
-                'audio': None,
-                'word': None
-            }
-            edge_index_dict = {
-                ('audio', 'similar_to', 'audio'): self.graph['audio', 'similar_to', 'audio'].edge_index,
-                ('word', 'similar_to', 'word'): self.graph['word', 'similar_to', 'word'].edge_index,
-                ('audio', 'transcribed_as', 'word'): self.cross_edge_index,
-                ('word', 'rev_transcribed_as', 'audio'): self.cross_edge_index.flip(0)
-            }
-            
-            x_dict, pooled_dict = self.gnn(
-                features_dict=features_dict,
-                attention_mask_dict=attention_mask_dict,
-                edge_index_dict=edge_index_dict,
-                return_pooled=True
-            )
-            
-            h_audio = x_dict['audio']
-            h_word = x_dict['word']
-            
-            min_len = min(h_audio.shape[0], h_word.shape[0])
-            h_audio_pos = h_audio[:min_len]
-            h_word_pos = h_word[:min_len]
-            h_all = h_audio
-            
-            metrics = alignment_uniformity_score(
-                h_positive_a=h_audio_pos,
-                h_positive_b=h_word_pos,
-                h_all=h_all
-            )
-            
-            alignment = metrics['alignment']
-            uniformity = metrics['uniformity']
-            
-            if self.test_mask.sum() > 0:
-                test_edges = self.cross_edge_index[:, self.test_mask]
-                test_weights = self.cross_edge_weight[self.test_mask]
-                
-                h_audio_edges = h_audio[test_edges[0]]
-                h_word_edges = h_word[test_edges[1]]
-                p_pred = self.link_predictor(h_audio_edges, h_word_edges)
-                
-                link_pred_outputs = (p_pred.cpu(), test_weights.cpu())
-            else:
-                link_pred_outputs = (torch.tensor([]), torch.tensor([]))
-        
-        return {
-            'alignment': alignment,
-            'uniformity': uniformity,
-            'link_pred_outputs': link_pred_outputs
-        }
 
 
 # ============================================================================
@@ -383,30 +41,53 @@ def train_and_evaluate_config(
     epochs: int = 20,
     default_config_path: str = None,
 ) -> dict:
-    """Entraîne et évalue une configuration pour la CV."""
+    """
+    Entraîne et évalue une configuration pour la CV.
+    
+    Cette fonction crée un Trainer avec la configuration modifiée,
+    l'entraîne, puis l'évalue.
+    """
     try:
-        config = base_config.copy()
-        config['loss_weights']['alpha'] = hyperparams.alpha
-        config['loss_weights']['beta'] = hyperparams.beta
-        config['dropout']['orphan_fraction'] = hyperparams.orphan_fraction
-        config['graph']['gnn_layers'] = hyperparams.gnn_layers
-        config['training']['lr_gnn'] = hyperparams.lr
-        config['training']['dropout'] = hyperparams.dropout
-        config['training']['weight_decay'] = float(hyperparams.weight_decay)
-        config['training']['epochs'] = epochs
+        # Construire la configuration modifiée
+        config_override = {
+            'loss_weights': {
+                'alpha': hyperparams.alpha,
+                'beta': hyperparams.beta
+            },
+            'dropout': {
+                'orphan_fraction': hyperparams.orphan_fraction
+            },
+            'graph': {
+                'gnn_layers': hyperparams.gnn_layers
+            },
+            'training': {
+                'lr_gnn': hyperparams.lr,
+                'dropout': hyperparams.dropout,
+                'weight_decay': float(hyperparams.weight_decay),
+                'epochs': epochs
+            }
+        }
         
-        pipeline = CVPipeline(
-            default_config_path=default_config_path,
-            config=config,
+        # Ajouter tau si présent
+        if hasattr(hyperparams, 'tau') and hyperparams.tau is not None:
+            config_override['training']['tau'] = hyperparams.tau
+        
+        # Créer le Trainer avec la configuration modifiée
+        trainer = Trainer(
+            config_path=default_config_path,
+            config_override=config_override,
             processed_dir=processed_dir,
             output_dir=output_dir,
-            fold=fold,
             train_indices=train_indices,
-            val_indices=val_indices
+            val_indices=val_indices,
+            fold=fold
         )
         
-        train_results = pipeline.train(epochs)
-        eval_results = pipeline.evaluate()
+        # Entraîner
+        train_results = trainer.train(epochs=epochs)
+        
+        # Évaluer (utilise les mêmes modèles que ceux entraînés)
+        eval_results = trainer.evaluate()
         
         return {
             'alignment': eval_results['alignment'],
@@ -611,13 +292,13 @@ def run_cv_main():
     parser.add_argument(
         '--processed_dir',
         type=str,
-        default='./data/graphs/ewondo',
+        default='./data/graphs/zulu',
         help='Dossier des données pré-traitées'
     )
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='./outputs/ewondo/cv',
+        default='./outputs/zulu/cv',
         help='Dossier de sortie'
     )
     parser.add_argument(
@@ -649,7 +330,7 @@ def run_cv_main():
         cv_config['alpha_grid'] = [0.001]
         cv_config['beta_grid'] = [0.001]
         cv_config['orphan_fraction_grid'] = [0.1]
-        cv_config['gnn_layers_grid'] = [3,4,5]
+        cv_config['gnn_layers_grid'] = [3, 4, 5]
         cv_config['lr_grid'] = [0.001]
         cv_config['dropout_grid'] = [0.1]
         cv_config['weight_decay_grid'] = [1e-5]
@@ -667,7 +348,7 @@ def run_cv_main():
     print(f"📊 Époques par fold: {epochs}")
     
     # Vérifier que les données existent
-    model =  base_config['encoder']['backbone'].split('/')[1]
+    model = base_config['encoder']['backbone'].split('/')[1]
     representation = base_config['linguistic']['representation']
     features_path = Path(args.processed_dir) / 'features' / f'frame_features_{model}.pt'
     if not features_path.exists():
@@ -694,7 +375,7 @@ def run_cv_main():
     config_counter = 0
     
     # Fonction pour la CV (1 argument)
-    def train_and_eval(config: HyperparamConfig, default_config_path):
+    def train_and_eval(config: HyperparamConfig):
         """Wrapper pour trainer une configuration."""
         nonlocal config_counter
         config_counter += 1
@@ -802,7 +483,8 @@ def run_cv_main():
             if (params['alpha'] == best_config.alpha and
                 params['beta'] == best_config.beta and
                 params['orphan_fraction'] == best_config.orphan_fraction and
-                params['gnn_layers'] == best_config.gnn_layers) and params['tau'] == best_config.tau:
+                params['gnn_layers'] == best_config.gnn_layers and
+                params.get('tau') == best_config.tau):
                 results['is_best'] = True
                 break
         
@@ -811,7 +493,7 @@ def run_cv_main():
             all_results=all_results,
             output_dir=Path(args.output_dir),
             best_config=best_config,
-            name_result = f'{model}_{representation}'
+            name_result=f'{model}_{representation}'
         )
         
         print("\n" + "="*60)
@@ -830,7 +512,7 @@ Mettez à jour config/default.yaml avec ces valeurs:
     lr_gnn: {best_config.lr}
     dropout: {best_config.dropout}
     weight_decay: {best_config.weight_decay}
-        tau: {best_config.tau}
+    tau: {best_config.tau}
         """)
         
     except Exception as e:

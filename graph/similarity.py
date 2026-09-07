@@ -7,7 +7,8 @@ elles ne dépendent jamais du locuteur ni de l'audio. C'est ce qui justifie
 qu'un probing "identité du locuteur" sur les nœuds G_l seul ne peut
 structurellement rien donner (cf. discussion).
 """
-
+from transformers import AutoTokenizer, AutoModel
+import torch
 from enum import Enum
 import torch
 import numpy as np
@@ -18,12 +19,13 @@ import panphon.segment
 
 class LinguisticRepresentation(str, Enum):
     LABSE = "labse"
-    BAG_OF_PHONEMES = "bag_of_phonemes"
+    AFRIBERTA = "afriberta"
     ARTICULATORY = "articulatory"
 
 
 # Cache global pour les modèles (évite de recharger à chaque appel)
 _LABSE_MODEL = None
+_AfriBerta_MODEL = None
 
 
 def get_labse_model():
@@ -34,7 +36,99 @@ def get_labse_model():
     return _LABSE_MODEL
 
 
+
+_AFRIBERTA_TOKENIZER = None
+_AFRIBERTA_MODEL = None
+
+
+def get_afriberta_model():
+    """Charge et retourne AfriBERTa en cache."""
+    global _AFRIBERTA_TOKENIZER, _AFRIBERTA_MODEL
+
+    if _AFRIBERTA_MODEL is None:
+        model_name = "castorini/afriberta_base"
+
+        _AFRIBERTA_TOKENIZER = AutoTokenizer.from_pretrained(model_name)
+        _AFRIBERTA_TOKENIZER.model_max_length = 512
+
+        _AFRIBERTA_MODEL = AutoModel.from_pretrained(model_name)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _AFRIBERTA_MODEL = _AFRIBERTA_MODEL.to(device)
+        _AFRIBERTA_MODEL.eval()
+
+    return _AFRIBERTA_TOKENIZER, _AFRIBERTA_MODEL
+
+
 def compute_labse_embeddings(phrases: list[str]) -> torch.Tensor:
+    """
+    Encode chaque phrase avec LaBSE.
+
+    Returns:
+        Tensor de forme (N, 768).
+    """
+    model = get_labse_model()
+    embeddings = model.encode(phrases, convert_to_tensor=True)
+    return embeddings
+
+
+def compute_afriberta_embeddings(
+    phrases: list[str],
+    batch_size: int = 16
+) -> torch.Tensor:
+    """
+    Encode les mots/phrases avec AfriBERTa.
+
+    Mean pooling masqué sur les tokens suivi d'une normalisation L2.
+
+    Returns:
+        Tensor de forme (N, 768).
+    """
+    tokenizer, model = get_afriberta_model()
+    device = next(model.parameters()).device
+
+    all_embeddings = []
+
+    for start in range(0, len(phrases), batch_size):
+        batch_phrases = phrases[start:start + batch_size]
+
+        inputs = tokenizer(
+            batch_phrases,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512
+        )
+        inputs = {
+            key: value.to(device)
+            for key, value in inputs.items()
+        }
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        hidden_states = outputs.last_hidden_state
+        attention_mask = inputs["attention_mask"].unsqueeze(-1).to(
+            hidden_states.dtype
+        )
+
+        embeddings = (
+            (hidden_states * attention_mask).sum(dim=1)
+            / attention_mask.sum(dim=1).clamp(min=1e-9)
+        )
+
+        embeddings = torch.nn.functional.normalize(
+            embeddings, p=2, dim=-1
+        )
+
+        all_embeddings.append(embeddings.cpu())
+
+    if not all_embeddings:
+        return torch.empty((0, 768), dtype=torch.float32)
+
+    return torch.cat(all_embeddings, dim=0)
+    
+def compute_afriberta_embeddings(phrases: list[str]) -> torch.Tensor:
     """
     Encode chaque phrase avec LaBSE (Feng et al., 2022).
     
@@ -44,7 +138,7 @@ def compute_labse_embeddings(phrases: list[str]) -> torch.Tensor:
     Returns:
         embeddings: (N_phrases, 768) - Embeddings LaBSE pour chaque phrase
     """
-    model = get_labse_model()
+    model = get_afriberta_model()
     # LaBSE encode directement des phrases complètes
     embeddings = model.encode(phrases, convert_to_tensor=True)
     return embeddings
@@ -271,6 +365,7 @@ if __name__ == "__main__":
         phrases_phonemes=phrases_phonemes
     )
     print(f"Similarité Articulatoire:\n{sim_art}\n")
+
 
 
 

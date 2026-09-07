@@ -140,8 +140,8 @@ class AudioTextDataset(Dataset):
         waveform = waveform.squeeze(0)
         
         # Tronquer
-        if self.max_length is not None and waveform.shape[0] > self.max_length:
-            waveform = waveform[:self.max_length]
+        #if self.max_length is not None and waveform.shape[0] > self.max_length:
+        #    waveform = waveform[:self.max_length]
         
         # Normaliser
         if self.normalize:

@@ -10,10 +10,17 @@ Fournit des statistiques détaillées sur :
 - Statistiques par nœud audio et word
 - Visualisation des distributions
 """
+
 import sys
+import os
 from pathlib import Path
-# Ajouter le dossier parent au path
-sys.path.append(str(Path(__file__).parent.parent))
+
+# Ajouter le dossier racine du projet au path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+print(f"📁 Project root: {project_root}")
+
 import argparse
 import torch
 import numpy as np
@@ -186,12 +193,12 @@ class GraphAnalyzer:
                 audio_degrees[self.audio_audio_edges[1, i]] += 1
             
             results["audio_audio_degrees"] = {
-                "mean": audio_degrees.float().mean().item(),
-                "std": audio_degrees.float().std().item(),
-                "min": audio_degrees.min().item(),
-                "max": audio_degrees.max().item(),
-                "median": audio_degrees.median().item(),
-                "distribution": Counter(audio_degrees.tolist())
+                "mean": float(audio_degrees.float().mean().item()),
+                "std": float(audio_degrees.float().std().item()),
+                "min": int(audio_degrees.min().item()),
+                "max": int(audio_degrees.max().item()),
+                "median": int(audio_degrees.median().item()),
+                "distribution": {str(k): v for k, v in Counter(audio_degrees.tolist()).items()}
             }
             
             print(f"\n🎵 Degrés Audio-Audio:")
@@ -212,21 +219,21 @@ class GraphAnalyzer:
                 word_cross_degrees[word_idx] += 1
             
             results["cross_degrees_audio"] = {
-                "mean": audio_cross_degrees.float().mean().item(),
-                "std": audio_cross_degrees.float().std().item(),
-                "min": audio_cross_degrees.min().item(),
-                "max": audio_cross_degrees.max().item(),
-                "median": audio_cross_degrees.median().item(),
-                "distribution": Counter(audio_cross_degrees.tolist())
+                "mean": float(audio_cross_degrees.float().mean().item()),
+                "std": float(audio_cross_degrees.float().std().item()),
+                "min": int(audio_cross_degrees.min().item()),
+                "max": int(audio_cross_degrees.max().item()),
+                "median": int(audio_cross_degrees.median().item()),
+                "distribution": {str(k): v for k, v in Counter(audio_cross_degrees.tolist()).items()}
             }
             
             results["cross_degrees_word"] = {
-                "mean": word_cross_degrees.float().mean().item(),
-                "std": word_cross_degrees.float().std().item(),
-                "min": word_cross_degrees.min().item(),
-                "max": word_cross_degrees.max().item(),
-                "median": word_cross_degrees.median().item(),
-                "distribution": Counter(word_cross_degrees.tolist())
+                "mean": float(word_cross_degrees.float().mean().item()),
+                "std": float(word_cross_degrees.float().std().item()),
+                "min": int(word_cross_degrees.min().item()),
+                "max": int(word_cross_degrees.max().item()),
+                "median": int(word_cross_degrees.median().item()),
+                "distribution": {str(k): v for k, v in Counter(word_cross_degrees.tolist()).items()}
             }
             
             print(f"\n🔗 Degrés Cross (Audio vers Word):")
@@ -351,7 +358,7 @@ class GraphAnalyzer:
         results["components"] = {
             "n_components": n_components,
             "largest_component_size": largest_size,
-            "largest_component_fraction": largest_size / G.number_of_nodes(),
+            "largest_component_fraction": largest_size / G.number_of_nodes() if G.number_of_nodes() > 0 else 0,
             "isolated_nodes": sum(1 for node in G.nodes() if G.degree(node) == 0),
             "component_sizes": [len(c) for c in components]
         }
@@ -389,15 +396,23 @@ class GraphAnalyzer:
         
         features = self.audio_features.numpy()
         
+        # Calculer le rang de manière robuste
+        try:
+            rank = int(np.linalg.matrix_rank(features))
+        except Exception as e:
+            print(f"   ⚠️ Erreur lors du calcul du rang: {e}")
+            rank = 0
+        
+        # Calculer les statistiques
         results = {
-            "shape": features.shape,
+            "shape": list(features.shape),
             "mean": float(np.mean(features)),
             "std": float(np.std(features)),
             "min": float(np.min(features)),
             "max": float(np.max(features)),
             "norm_mean": float(np.mean(np.linalg.norm(features, axis=1))),
             "norm_std": float(np.std(np.linalg.norm(features, axis=1))),
-            "rank": int(np.linalg.matrix_rank(features))
+            "rank": rank
         }
         
         print(f"\n📊 Statistiques des features audio:")
@@ -419,15 +434,23 @@ class GraphAnalyzer:
         
         features = self.word_features.numpy()
         
+        # Calculer le rang de manière robuste
+        try:
+            rank = int(np.linalg.matrix_rank(features))
+        except Exception as e:
+            print(f"   ⚠️ Erreur lors du calcul du rang: {e}")
+            rank = 0
+        
+        # Calculer les statistiques
         results = {
-            "shape": features.shape,
+            "shape": list(features.shape),
             "mean": float(np.mean(features)),
             "std": float(np.std(features)),
             "min": float(np.min(features)),
             "max": float(np.max(features)),
             "norm_mean": float(np.mean(np.linalg.norm(features, axis=1))),
             "norm_std": float(np.std(np.linalg.norm(features, axis=1))),
-            "rank": int(np.linalg.matrix_rank(features))
+            "rank": rank
         }
         
         print(f"\n📊 Statistiques des features word:")
@@ -528,7 +551,7 @@ class GraphAnalyzer:
             ax.set_ylabel("Fréquence")
             ax.legend()
         
-        # 3. Distribution des poids
+        # 3. Distribution des poids audio-audio
         if self.audio_audio_weights is not None and len(self.audio_audio_weights) > 0:
             ax = axes[0, 2]
             ax.hist(self.audio_audio_weights.numpy(), bins=20, alpha=0.7, color='blue')

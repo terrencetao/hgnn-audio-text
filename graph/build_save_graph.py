@@ -21,7 +21,11 @@ from tqdm import tqdm
 # Imports depuis les dossiers du projet
 from models.encoders import FrozenAcousticBackbone
 from graph.build_graph import GraphBuildConfig, build_heterogeneous_graph
-from graph.similarity import LinguisticRepresentation, compute_labse_embeddings
+from graph.similarity import (
+    LinguisticRepresentation,
+    compute_labse_embeddings,
+    compute_afriberta_embeddings
+)
 from data.datasets import AudioTextDataset, Collator
 
 
@@ -258,6 +262,10 @@ class GraphBuilder:
         
         if representation_type == LinguisticRepresentation.LABSE:
             features = compute_labse_embeddings(unique_transcriptions)
+
+        elif representation_type == LinguisticRepresentation.AFRIBERTA:
+            features = compute_afriberta_embeddings(unique_transcriptions)
+
         else:
             raise ValueError(f"Unknown representation: {representation_type}")
         
@@ -566,6 +574,8 @@ def build_and_save_graph(config_path: str = "config/default.yaml", **kwargs):
     rep_type = LinguisticRepresentation.LABSE
     if representation_type.lower() == "labse":
         rep_type = LinguisticRepresentation.LABSE
+    elif representation_type.lower() == "afriberta":
+        rep_type = LinguisticRepresentation.AFRIBERTA
     elif representation_type.lower() == "bag_of_phonemes":
         rep_type = LinguisticRepresentation.BAG_OF_PHONEMES
     elif representation_type.lower() == "articulatory":
@@ -611,9 +621,9 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--no_mst", action="store_true")
-    parser.add_argument("--representation", type=str, choices=["labse", "bag_of_phonemes", "articulatory"], default=None)
+    parser.add_argument("--representation", type=str, choices=["labse", "afriberta", "bag_of_phonemes", "articulatory"], default=None)
     parser.add_argument("--device", type=str, choices=["cuda", "cpu"], default=None)
-    parser.add_argument("--pooling", type=str, choices=["mean", "max", "first"], default=None)
+    #parser.add_argument("--pooling", type=str, choices=["mean", "max", "first"], default=None)
     
     args = parser.parse_args()
     
@@ -635,11 +645,12 @@ def main():
         kwargs['representation'] = args.representation
     if args.device is not None:
         kwargs['device'] = args.device
-    if args.pooling is not None:
-        kwargs['pooling'] = args.pooling
+    #if args.pooling is not None:
+    #    kwargs['pooling'] = args.pooling
     
     build_and_save_graph(config_path=args.config, **kwargs)
 
 
 if __name__ == "__main__":
     main()
+

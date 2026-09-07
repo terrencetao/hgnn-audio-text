@@ -36,7 +36,7 @@ import json
 import warnings
 warnings.filterwarnings("ignore")
 
-from graph.build_graph import GraphBuildConfig
+from graph.build_graph import GraphBuildConfig, dtw_cosine_distance
 from models.gnn import HeterogeneousGNN
 from models.link_predictor import LinkPredictor
 from graph.build_save_graph import GraphBuilder
@@ -357,7 +357,40 @@ class RetrievalEvaluator:
             return torch.tensor(edges, dtype=torch.long).T
         else:
             return torch.tensor([[], []], dtype=torch.long)
+    
+    def compute_audio_dtw_similarity(
+    query_features: torch.Tensor,
+        reference_graph: torch.Any,
+        )
+        if frame_features.dim() != 3:
+        raise ValueError(
+            f"Expected (N, T, D), got {frame_features.shape}"
+        )
 
+        N = frame_features.shape[0]
+
+        distance_matrix = torch.zeros(
+            (1, N),
+            dtype=torch.float32
+        )
+
+        for i in range(N):
+
+            distance = dtw_cosine_distance(
+                    query_features,
+                    frame_features[j]
+                )
+
+            distance_matrix[i, j] = distance
+            distance_matrix[j, i] = distance
+
+        # Distance -> similarity
+        similarity_matrix = torch.exp(
+            -distance_matrix
+        )
+
+        return similarity_matrix
+        
     def build_edges_by_similarity_threshold(
         self,
         query_features: torch.Tensor,
@@ -376,7 +409,7 @@ class RetrievalEvaluator:
         query_feats = F.normalize(query_features, p=2, dim=-1)
         ref_feats = F.normalize(ref_audio_features, p=2, dim=-1)
 
-        sims = query_feats @ ref_feats.T
+        sims = compute_audio_dtw_similarity(query_feats, ref_feats)
         sims = sims.squeeze(0)
 
         mask = sims > self.similarity_threshold

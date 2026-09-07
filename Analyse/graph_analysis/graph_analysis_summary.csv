@@ -1,0 +1,14 @@
+metric,value
+n_audio,29.0
+n_word,29.0
+n_audio_audio_edges,56.0
+n_word_word_edges,0.0
+n_cross_edges,29.0
+density_audio_audio,0.13793103448275862
+density_word_word,0.0
+density_cross,0.034482758620689655
+n_components,1.0
+isolated_nodes,0.0
+orphan_audio,0.0
+cross_weight_mean,1.0
+cross_weight_exact_match_fraction,1.0
