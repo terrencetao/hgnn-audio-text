@@ -1,0 +1,142 @@
+Exemples d'utilisation
+1. Split complet avec export par langue
+bash
+
+python split_stratified_by_source.py \
+    --input ./data/merged/multilingual_dataset.csv \
+    --output_dir ./data/split \
+    --train_ratio 0.7 \
+    --test_ratio 0.15 \
+    --val_ratio 0.15 \
+    --split_by source \
+    --create_validation \
+    --language_column language \
+    --random_seed 42
+
+2. Split avec ratios personnalisés par source
+bash
+
+python split_stratified_by_source.py \
+    --input combined.csv \
+    --source_ratios "bajia=0.9,0.1" "ewondo=0.7,0.3" "common_voice=0.8,0.2" \
+    --split_by source \
+    --train_ratio 0.8 \
+    --test_ratio 0.2
+
+3. Split par langue plutôt que par source
+bash
+
+python split_stratified_by_source.py \
+    --input multilingual_dataset.csv \
+    --split_by language \
+    --language_column language \
+    --train_ratio 0.8 \
+    --test_ratio 0.2
+
+4. Split sans export par langue
+bash
+
+python split_stratified_by_source.py \
+    --input combined.csv \
+    --no_export_by_language \
+    --train_ratio 0.8 \
+    --test_ratio 0.2
+
+5. Split avec validation mais sans fichiers combinés par langue
+bash
+
+python split_stratified_by_source.py \
+    --input combined.csv \
+    --train_ratio 0.7 \
+    --test_ratio 0.15 \
+    --val_ratio 0.15 \
+    --create_validation \
+    --no_combine_language
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+ Exemples d'utilisation
+1. Fusionner plusieurs datasets de langues différentes
+bash
+
+# Fusionner 3 datasets avec leur langue
+python merge_multiple_datasets.py \
+    --datasets \
+        ./data/bajia/metadata.csv \
+        ./data/ewondo/metadata.csv \
+        ./data/common_voice/metadata.csv \
+    --source_names "bajia" "ewondo" "common_voice" \
+    --language_mapping "bajia=bamoun" "ewondo=ewondo" "common_voice=afrikaans" \
+    --add_language \
+    --output_dir ./data/merged \
+    --output_filename multilingual_dataset.csv
+    
+    
+2. Split stratifié par source avec validation
+bash
+
+python split_stratified_by_source.py \
+    --input ./data/merged/multilingual_dataset.csv \
+    --output_dir ./data/split \
+    --train_ratio 0.7 \
+    --test_ratio 0.15 \
+    --val_ratio 0.15 \
+    --split_by source \
+    --create_validation \
+    --random_seed 42
+    
+    
+4. Split avec ratios personnalisés par source
+bash
+
+python split_stratified_by_source.py \
+    --input combined.csv \
+    --source_ratios "bajia=0.9,0.1" "ewondo=0.7,0.3" "common_voice=0.8,0.2" \
+    --train_ratio 0.8 \
+    --test_ratio 0.2
+    
+    
+5. Fusionner uniquement les données d'entraînement
+bash
+
+# Fusionner plusieurs fichiers train
+python merge_multiple_datasets.py \
+    --datasets \
+        ./data/dataset1/train.csv \
+        ./data/dataset2/train.csv \
+        ./data/dataset3/train.csv \
+    --source_names "ds1" "ds2" "ds3" \
+    --output_filename all_train.csv \
+    --no_shuffle
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    

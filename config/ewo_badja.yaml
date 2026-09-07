@@ -1,0 +1,86 @@
+# config/default.yaml
+# Configuration complète pour tout le pipeline
+
+# ============================================================================
+# DONNÉES
+# ============================================================================
+data:
+  # Données brutes
+  raw_dir: "./data/raw/ewo_badja"
+  metadata_csv: "./data/processed/ewo_badja/train.csv"
+  
+  # Données traitées (graphe + features)
+  processed_dir: "./data/graphs/ewo_badja"
+  
+  
+  # Paramètres audio
+  sample_rate: 16000
+  max_length: None  # 10 secondes
+  normalize: true
+  
+output_dir: "./data/graphs/ewo_badja"
+# ============================================================================
+# ENCODEUR ACOUSTIQUE
+# ============================================================================
+encoder:
+  backbone: "facebook/wav2vec2-xls-r-300m"
+  hidden_dim: 768
+  freeze_backbone: true
+
+# ============================================================================
+# REPRÉSENTATION LINGUISTIQUE
+# ============================================================================
+linguistic:
+  representation: "labse"  # labse, bag_of_phonemes, articulatory
+
+# ============================================================================
+# GRAPHE (pour la construction ET l'entraînement)
+# ============================================================================
+graph:
+  # Construction du graphe
+  build:
+    similarity_threshold: 0.8
+    use_mst: true
+    backbone_method: "mst"
+    ensure_connectivity: true
+  
+  # Architecture du GNN
+  gnn_layers: 2
+
+# ============================================================================
+# ENTRAÎNEMENT
+# ============================================================================
+training:
+  epochs: 1000
+  batch_size: 16
+  lr_gnn: 0.001
+  weight_decay: 1e-5
+  dropout: 0.1
+  grad_clip: 1.0
+  device: "cpu"
+  seed: 42
+  test_edge_fraction: 0.1 
+  output_dir: "./outputs/zulu"
+  tau: 0.7
+  negative_ratio: 1.0
+
+# ============================================================================
+# PERTES
+# ============================================================================
+loss_weights:
+  alpha: 0.1  # L_acoustic
+  beta: 0.1   # L_reg
+
+# ============================================================================
+# DROPOUT DE MODALITÉ
+# ============================================================================
+dropout:
+  orphan_fraction: 0.1
+
+# ============================================================================
+# SYSTÈME
+# ============================================================================
+system:
+  num_workers: 4
+  pin_memory: true
+  verbose: true
